@@ -1,9 +1,10 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid, Environment } from '@react-three/drei';
 import type { Mesh } from 'three';
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
+import { startGestureControl } from './lib/gestureControl';
 
 type ShapeProps = {
   position: [number, number, number];
@@ -196,6 +197,11 @@ function ChatBox() {
 
 export default function App() {
   const objects = useSceneStore((s) => s.objects);
+
+  useEffect(() => {
+    const socket = startGestureControl();
+    return () => { socket.disconnect(); };
+  }, []);
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
