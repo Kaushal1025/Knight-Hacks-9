@@ -15,6 +15,7 @@ import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
 
 import HandTrackingStatus from './HandTrackingStatus';
+import HandSkeletons from './HandSkeletons';
 import { useHandTracking } from './hooks/useHandTracking';
 import type { HandData, ScalingData } from './hooks/useHandTracking';
 
@@ -605,8 +606,6 @@ export default function App() {
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
   const objects = useSceneStore((s) => s.objects);
 
-  const hand = hands.find((h) => h.hand === 'Right') ?? hands[0];
-
   // Friendly name for the overlay (AI objects show their shape, not their id)
   const selectedLabel =
     selectedObject === null || selectedObject === 'cube' || selectedObject === 'sphere'
@@ -623,24 +622,8 @@ export default function App() {
         selectedObject={selectedLabel}
       />
 
-      {hand && (
-        <div
-          style={{
-            position: 'fixed',
-            left: `${hand.position.x * 100}%`,
-            top: `${hand.position.y * 100}%`,
-            transform: 'translate(-50%, -50%)',
-            width: hand.pinching ? 28 : 18,
-            height: hand.pinching ? 28 : 18,
-            borderRadius: '50%',
-            background: hand.pinching ? '#00ff88' : '#ffffff',
-            border: '2px solid #111',
-            boxShadow: '0 0 14px #00ff88',
-            pointerEvents: 'none',
-            zIndex: 999,
-          }}
-        />
-      )}
+      {/* Hand skeletons + a cursor between thumb and index of each hand */}
+      <HandSkeletons hands={hands} scaling={scaling} />
 
       <Canvas shadows camera={{ position: [4, 3, 5], fov: 50 }}>
         <Scene
