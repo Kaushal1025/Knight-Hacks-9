@@ -19,9 +19,17 @@ export interface HandData {
   }>;
 }
 
+/** Two-hand scaling state from the CV backend (absent on older backends). */
+export interface ScalingData {
+  active: boolean;
+  /** Relative to the hand distance when both hands started pinching. 1.0 = original size. */
+  scale_factor: number;
+}
+
 interface TrackingData {
   timestamp: number;
   hands: HandData[];
+  scaling?: ScalingData | null;
 }
 
 const socket = io(
@@ -35,6 +43,7 @@ export function useHandTracking() {
   const [hands, setHands] = useState<HandData[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
+  const [scaling, setScaling] = useState<ScalingData | null>(null);
 
   useEffect(() => {
     const onConnect = () => {
@@ -47,10 +56,12 @@ export function useHandTracking() {
       console.log("Disconnected from CV backend");
       setConnected(false);
       setHands([]);
+      setScaling(null);
     };
 
     const onHandData = (data: TrackingData) => {
       setHands(data.hands);
+      setScaling(data.scaling ?? null);
     };
 
     const onError = (err: Error) => {
@@ -74,5 +85,5 @@ export function useHandTracking() {
     };
   }, []);
 
-  return { hands, connected, error };
+  return { hands, connected, error, scaling };
 }
