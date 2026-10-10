@@ -1,46 +1,66 @@
-import { useRef, useState, useEffect } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { useEffect, useRef, useState } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Environment } from '@react-three/drei';
-import type { Mesh } from 'three';
+import {
+  Mesh,
+  Plane,
+  Raycaster,
+  Vector2,
+  Vector3,
+} from 'three';
+import type { RefObject } from 'react';
+
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
-import { startGestureControl } from './lib/gestureControl';
+
+import HandTrackingStatus from './HandTrackingStatus';
+import { useHandTracking } from './hooks/useHandTracking';
+import type { HandData } from './hooks/useHandTracking';
+
+// ==========================================
+// SHAPE PROPS
+// ==========================================
 
 type ShapeProps = {
   position: [number, number, number];
   color: string;
+  meshRef: RefObject<Mesh | null>;
+  grabbed: boolean;
 };
 
-function Cube({ position, color }: ShapeProps) {
-  const ref = useRef<Mesh>(null);
-  const [hovered, setHovered] = useState(false);
+// ==========================================
+// CUBE
+// ==========================================
 
-  useFrame((_, delta) => {
-    if (ref.current) {
-      ref.current.rotation.x += delta * 0.4;
-      ref.current.rotation.y += delta * 0.6;
-    }
-  });
+function Cube({ position, color, meshRef, grabbed }: ShapeProps) {
+  const [hovered, setHovered] = useState(false);
 
   return (
     <mesh
-      ref={ref}
+      ref={meshRef}
       position={position}
       castShadow
       onPointerOver={() => setHovered(true)}
       onPointerOut={() => setHovered(false)}
     >
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial color={hovered ? '#ffffff' : color} />
+      <meshStandardMaterial
+        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
+      />
     </mesh>
   );
 }
 
-function Sphere({ position, color }: ShapeProps) {
+// ==========================================
+// SPHERE
+// ==========================================
+
+function Sphere({ position, color, meshRef, grabbed }: ShapeProps) {
   const [hovered, setHovered] = useState(false);
 
   return (
     <mesh
+      ref={meshRef}
       position={position}
       castShadow
       onPointerOver={() => setHovered(true)}
@@ -48,13 +68,17 @@ function Sphere({ position, color }: ShapeProps) {
     >
       <sphereGeometry args={[0.6, 32, 32]} />
       <meshStandardMaterial
-        color={hovered ? '#ffffff' : color}
+        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
         roughness={0.3}
         metalness={0.2}
       />
     </mesh>
   );
 }
+
+// ==========================================
+// GROUND
+// ==========================================
 
 function Ground() {
   return (
@@ -65,16 +89,26 @@ function Ground() {
   );
 }
 
-// Renders any AI-created object based on its shape type
-function DynamicObject({ obj }: { obj: SceneObject }) {
+// ==========================================
+// DYNAMIC OBJECT (AI-created, chat-driven)
+// ==========================================
+
+function DynamicObject({
+  obj,
+  grabbed,
+  registerRef,
+}: {
+  obj: SceneObject;
+  grabbed: boolean;
+  registerRef: (id: string, mesh: Mesh | null) => void;
+}) {
   const [hovered, setHovered] = useState(false);
-  const position = obj.position;
-  const color = hovered ? '#ffffff' : obj.color;
-  const scale = obj.scale;
+  const color = grabbed ? '#00ff88' : hovered ? '#ffffff' : obj.color;
 
   const commonProps = {
-    position,
-    scale,
+    ref: (mesh: Mesh | null) => registerRef(obj.id, mesh),
+    position: obj.position,
+    scale: obj.scale,
     castShadow: true,
     onPointerOver: () => setHovered(true),
     onPointerOut: () => setHovered(false),
@@ -113,6 +147,10 @@ function DynamicObject({ obj }: { obj: SceneObject }) {
       return null;
   }
 }
+
+// ==========================================
+// CHAT BOX
+// ==========================================
 
 function ChatBox() {
   const [input, setInput] = useState('');
@@ -195,50 +233,238 @@ function ChatBox() {
   );
 }
 
-export default function App() {
+// ==========================================
+// THREE.JS SCENE
+// ==========================================
+
+type GrabTarget =
+  | { type: 'cube'; mesh: Mesh }
+  | { type: 'sphere'; mesh: Mesh }
+  | { type: 'dynamic'; id: string; mesh: Mesh };
+
+function Scene({ hands }: { hands: HandData[] }) {
+  const { camera } = useThree();
+
   const objects = useSceneStore((s) => s.objects);
+  const moveObject = useSceneStore((s) => s.moveObject);
+
+  const cubeRef = useRef<Mesh>(null);
+  const sphereRef = useRef<Mesh>(null);
+  const dynamicMeshRefs = useRef(new Map<string, Mesh>());
+
+  const registerDynamicRef = (id: string, mesh: Mesh | null) => {
+    if (mesh) {
+      dynamicMeshRefs.current.set(id, mesh);
+    } else {
+      dynamicMeshRefs.current.delete(id);
+    }
+  };
+
+  const handsRef = useRef(hands);
+  const raycaster = useRef(new Raycaster());
+  const cursor = useRef(new Vector2());
+
+  const previousPinching = useRef(false);
+  const previousHandLabel = useRef<string | null>(null);
+
+  const activeGrab = useRef<
+    (GrabTarget & { handLabel: string; plane: Plane; offset: Vector3 }) | null
+  >(null);
+
+  const [grabbedObject, setGrabbedObject] = useState<string | null>(null);
 
   useEffect(() => {
-    const socket = startGestureControl();
-    return () => { socket.disconnect(); };
-  }, []);
+    handsRef.current = hands;
+  }, [hands]);
+
+  useFrame((_, delta) => {
+    if (cubeRef.current && activeGrab.current?.mesh !== cubeRef.current) {
+      cubeRef.current.rotation.x += delta * 0.4;
+      cubeRef.current.rotation.y += delta * 0.6;
+    }
+
+    const currentHands = handsRef.current;
+    const grab = activeGrab.current;
+
+    const hand = grab
+      ? currentHands.find((h) => h.hand === grab.handLabel)
+      : currentHands.find((h) => h.hand === 'Right') ?? currentHands[0];
+
+    if (!hand) {
+      if (activeGrab.current) {
+        activeGrab.current = null;
+        setGrabbedObject(null);
+      }
+      previousPinching.current = false;
+      previousHandLabel.current = null;
+      return;
+    }
+
+    const pinching = hand.pinching;
+    const position = hand.position;
+
+    cursor.current.set(position.x * 2 - 1, 1 - position.y * 2);
+    raycaster.current.setFromCamera(cursor.current, camera);
+    const ray = raycaster.current.ray;
+
+    if (activeGrab.current && !pinching) {
+      activeGrab.current = null;
+      setGrabbedObject(null);
+    }
+
+    const sameHand = previousHandLabel.current === hand.hand;
+    const pinchStarted = pinching && (!previousPinching.current || !sameHand);
+
+    if (pinchStarted && !activeGrab.current) {
+      const dynamicEntries = Array.from(dynamicMeshRefs.current.entries());
+      const meshes = [
+        cubeRef.current,
+        sphereRef.current,
+        ...dynamicEntries.map(([, mesh]) => mesh),
+      ].filter((mesh): mesh is Mesh => mesh !== null);
+
+      const intersections = raycaster.current.intersectObjects(meshes, false);
+
+      if (intersections.length > 0) {
+        const hit = intersections[0];
+        const mesh = hit.object as Mesh;
+
+        const normal = camera.getWorldDirection(new Vector3());
+        const plane = new Plane();
+        plane.setFromNormalAndCoplanarPoint(normal, mesh.position);
+        const offset = hit.point.clone().sub(mesh.position);
+
+        let target: GrabTarget;
+        if (mesh === cubeRef.current) {
+          target = { type: 'cube', mesh };
+        } else if (mesh === sphereRef.current) {
+          target = { type: 'sphere', mesh };
+        } else {
+          const found = dynamicEntries.find(([, m]) => m === mesh);
+          target = { type: 'dynamic', id: found![0], mesh };
+        }
+
+        activeGrab.current = {
+          ...target,
+          handLabel: hand.hand,
+          plane,
+          offset,
+        };
+
+        setGrabbedObject(
+          target.type === 'dynamic' ? target.id : target.type
+        );
+      }
+    }
+
+    if (activeGrab.current && pinching) {
+      const currentGrab = activeGrab.current;
+      const intersection = new Vector3();
+      const hasIntersection = ray.intersectPlane(currentGrab.plane, intersection);
+
+      if (hasIntersection) {
+        const target = intersection.sub(currentGrab.offset);
+        currentGrab.mesh.position.lerp(target, 0.35);
+
+        if (currentGrab.type === 'dynamic') {
+          moveObject(currentGrab.id, [
+            currentGrab.mesh.position.x,
+            currentGrab.mesh.position.y,
+            currentGrab.mesh.position.z,
+          ]);
+        }
+      }
+    }
+
+    previousPinching.current = pinching;
+    previousHandLabel.current = hand.hand;
+  });
+
+  return (
+    <>
+      <color attach="background" args={['#0f1115']} />
+
+      <ambientLight intensity={0.4} />
+      <directionalLight
+        position={[5, 8, 5]}
+        intensity={1.2}
+        castShadow
+        shadow-mapSize={[1024, 1024]}
+      />
+      <pointLight position={[-4, 3, -2]} intensity={0.5} color="#7aa2ff" />
+      <Environment preset="city" />
+
+      <Cube
+        meshRef={cubeRef}
+        position={[-1.2, 0.5, 0]}
+        color="#e94560"
+        grabbed={grabbedObject === 'cube'}
+      />
+      <Sphere
+        meshRef={sphereRef}
+        position={[1.2, 0.6, 0]}
+        color="#4cc9f0"
+        grabbed={grabbedObject === 'sphere'}
+      />
+      <Ground />
+      <Grid
+        position={[0, 0.001, 0]}
+        args={[20, 20]}
+        cellColor="#2a2f3a"
+        sectionColor="#3d4455"
+        fadeDistance={25}
+        infiniteGrid
+      />
+
+      {/* AI-created objects, also grabbable via hand gestures */}
+      {objects.map((obj) => (
+        <DynamicObject
+          key={obj.id}
+          obj={obj}
+          grabbed={grabbedObject === obj.id}
+          registerRef={registerDynamicRef}
+        />
+      ))}
+
+      <OrbitControls makeDefault enabled={grabbedObject === null} />
+    </>
+  );
+}
+
+// ==========================================
+// MAIN APP
+// ==========================================
+
+export default function App() {
+  const { hands, connected, error } = useHandTracking();
+
+  const hand = hands.find((h) => h.hand === 'Right') ?? hands[0];
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
+      <HandTrackingStatus hands={hands} connected={connected} error={error} />
+
+      {hand && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `${hand.position.x * 100}%`,
+            top: `${hand.position.y * 100}%`,
+            transform: 'translate(-50%, -50%)',
+            width: hand.pinching ? 28 : 18,
+            height: hand.pinching ? 28 : 18,
+            borderRadius: '50%',
+            background: hand.pinching ? '#00ff88' : '#ffffff',
+            border: '2px solid #111',
+            boxShadow: '0 0 14px #00ff88',
+            pointerEvents: 'none',
+            zIndex: 999,
+          }}
+        />
+      )}
+
       <Canvas shadows camera={{ position: [4, 3, 5], fov: 50 }}>
-        <color attach="background" args={['#0f1115']} />
-
-        {/* Lighting */}
-        <ambientLight intensity={0.4} />
-        <directionalLight
-          position={[5, 8, 5]}
-          intensity={1.2}
-          castShadow
-          shadow-mapSize={[1024, 1024]}
-        />
-        <pointLight position={[-4, 3, -2]} intensity={0.5} color="#7aa2ff" />
-        <Environment preset="city" />
-
-        {/* Scene objects */}
-        <Cube position={[-1.2, 0.5, 0]} color="#e94560" />
-        <Sphere position={[1.2, 0.6, 0]} color="#4cc9f0" />
-        <Ground />
-        <Grid
-          position={[0, 0.001, 0]}
-          args={[20, 20]}
-          cellColor="#2a2f3a"
-          sectionColor="#3d4455"
-          fadeDistance={25}
-          infiniteGrid
-        />
-
-        {/* AI-created objects */}
-        {objects.map((obj) => (
-          <DynamicObject key={obj.id} obj={obj} />
-        ))}
-
-        {/* Mouse controls (placeholder until gesture input is wired in) */}
-        <OrbitControls makeDefault />
+        <Scene hands={hands} />
       </Canvas>
 
       <ChatBox />
