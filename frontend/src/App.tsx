@@ -1,103 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, Environment } from '@react-three/drei';
+import { OrbitControls, Grid, Environment, TransformControls } from '@react-three/drei';
 import {
   MathUtils,
   Mesh,
   Plane,
   Raycaster,
+  Spherical,
   Vector2,
   Vector3,
 } from 'three';
-import type { RefObject } from 'react';
 
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
 
 import HandTrackingStatus from './HandTrackingStatus';
 import HandSkeletons from './HandSkeletons';
+import Inspector from './Inspector';
+import SnapPanel from './SnapPanel';
+import BooleanPanel from './BooleanPanel';
 import { useHandTracking } from './hooks/useHandTracking';
 import type { HandData, ScalingData } from './hooks/useHandTracking';
 
-// ==========================================
-// TWO-HAND SCALING SETTINGS
-// ==========================================
-
-/** Smallest / largest uniform scale a gesture can produce. */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
-/** 0–1 per frame. Higher = snappier, lower = smoother. */
 const SCALE_SMOOTHING = 0.35;
-/** Glow on the selected object (the one two-hand scaling will resize). */
 const SELECTED_EMISSIVE = '#ffd166';
-
-// ==========================================
-// SHAPE PROPS
-// ==========================================
-
-type ShapeProps = {
-  position: [number, number, number];
-  color: string;
-  meshRef: RefObject<Mesh | null>;
-  grabbed: boolean;
-  selected: boolean;
-};
-
-// ==========================================
-// CUBE
-// ==========================================
-
-function Cube({ position, color, meshRef, grabbed, selected }: ShapeProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <mesh
-      ref={meshRef}
-      position={position}
-      castShadow
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-    >
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial
-        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
-        emissive={selected ? SELECTED_EMISSIVE : '#000000'}
-        emissiveIntensity={selected ? 0.35 : 0}
-      />
-    </mesh>
-  );
-}
-
-// ==========================================
-// SPHERE
-// ==========================================
-
-function Sphere({ position, color, meshRef, grabbed, selected }: ShapeProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <mesh
-      ref={meshRef}
-      position={position}
-      castShadow
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-    >
-      <sphereGeometry args={[0.6, 32, 32]} />
-      <meshStandardMaterial
-        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
-        emissive={selected ? SELECTED_EMISSIVE : '#000000'}
-        emissiveIntensity={selected ? 0.35 : 0}
-        roughness={0.3}
-        metalness={0.2}
-      />
-    </mesh>
-  );
-}
-
-// ==========================================
-// GROUND
-// ==========================================
 
 function Ground() {
   return (
@@ -107,10 +35,6 @@ function Ground() {
     </mesh>
   );
 }
-
-// ==========================================
-// DYNAMIC OBJECT (AI-created, chat-driven)
-// ==========================================
 
 function DynamicObject({
   obj,
@@ -131,6 +55,7 @@ function DynamicObject({
   const commonProps = {
     ref: (mesh: Mesh | null) => registerRef(obj.id, mesh),
     position: obj.position,
+    rotation: obj.rotation,
     scale: obj.scale,
     castShadow: true,
     onPointerOver: () => setHovered(true),
@@ -142,11 +67,7 @@ function DynamicObject({
       return (
         <mesh {...commonProps}>
           <boxGeometry args={[1, 1, 1]} />
-          <meshStandardMaterial
-            color={color}
-            emissive={emissive}
-            emissiveIntensity={emissiveIntensity}
-          />
+          <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={emissiveIntensity} />
         </mesh>
       );
     case 'sphere':
@@ -166,32 +87,33 @@ function DynamicObject({
       return (
         <mesh {...commonProps}>
           <cylinderGeometry args={[0.5, 0.5, 1, 32]} />
-          <meshStandardMaterial
-            color={color}
-            emissive={emissive}
-            emissiveIntensity={emissiveIntensity}
-          />
+          <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={emissiveIntensity} />
         </mesh>
       );
     case 'cone':
       return (
         <mesh {...commonProps}>
           <coneGeometry args={[0.6, 1.2, 32]} />
-          <meshStandardMaterial
-            color={color}
-            emissive={emissive}
-            emissiveIntensity={emissiveIntensity}
-          />
+          <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={emissiveIntensity} />
         </mesh>
       );
+    case 'torus':
+      return (
+        <mesh {...commonProps}>
+          <torusGeometry args={[0.5, 0.2, 16, 32]} />
+          <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={emissiveIntensity} />
+        </mesh>
+      );
+    case 'custom':
+      return obj.geometry ? (
+        <mesh {...commonProps} geometry={obj.geometry}>
+          <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={emissiveIntensity} />
+        </mesh>
+      ) : null;
     default:
       return null;
   }
 }
-
-// ==========================================
-// CHAT BOX
-// ==========================================
 
 function ChatBox() {
   const [input, setInput] = useState('');
@@ -215,16 +137,7 @@ function ChatBox() {
   };
 
   return (
-    <div
-      style={{
-        position: 'absolute',
-        bottom: 20,
-        left: 20,
-        zIndex: 10,
-        width: 360,
-        fontFamily: 'sans-serif',
-      }}
-    >
+    <div style={{ position: 'absolute', bottom: 20, left: 20, zIndex: 10, width: 360, fontFamily: 'sans-serif' }}>
       {reply && (
         <div
           style={{
@@ -274,23 +187,10 @@ function ChatBox() {
   );
 }
 
-// ==========================================
-// THREE.JS SCENE
-// ==========================================
-
-type GrabTarget =
-  | { type: 'cube'; mesh: Mesh }
-  | { type: 'sphere'; mesh: Mesh }
-  | { type: 'dynamic'; id: string; mesh: Mesh };
-
-/** 'cube', 'sphere', or the AI object's id — used for highlighting and the status overlay. */
-function targetKey(target: GrabTarget): string {
-  return target.type === 'dynamic' ? target.id : target.type;
-}
+type GrabTarget = { id: string; mesh: Mesh };
 
 type ScaleSession = {
   target: GrabTarget;
-  /** The object's uniform scale when both hands started pinching. */
   initialScale: number;
 };
 
@@ -299,20 +199,22 @@ function Scene({
   scaling,
   selectedObject,
   onSelectedChange,
+  transformMode,
 }: {
   hands: HandData[];
   scaling: ScalingData | null;
   selectedObject: string | null;
   onSelectedChange: (key: string | null) => void;
+  transformMode: 'translate' | 'rotate' | 'scale';
 }) {
   const { camera } = useThree();
 
   const objects = useSceneStore((s) => s.objects);
   const moveObject = useSceneStore((s) => s.moveObject);
+  const rotateObject = useSceneStore((s) => s.rotateObject);
   const scaleObject = useSceneStore((s) => s.scaleObject);
+  const snap = useSceneStore((s) => s.snap);
 
-  const cubeRef = useRef<Mesh>(null);
-  const sphereRef = useRef<Mesh>(null);
   const dynamicMeshRefs = useRef(new Map<string, Mesh>());
 
   const registerDynamicRef = (id: string, mesh: Mesh | null) => {
@@ -335,13 +237,13 @@ function Scene({
     (GrabTarget & { handLabel: string; plane: Plane; offset: Vector3 }) | null
   >(null);
 
-  // The object two-hand scaling resizes. Set by a one-hand pinch on an object;
-  // stays selected after the pinch is released.
   const selected = useRef<GrabTarget | null>(null);
   const scaleSession = useRef<ScaleSession | null>(null);
-  // After two-hand scaling ends, the hand that is still pinching must open
-  // before it can start a new grab (otherwise it would grab immediately).
   const waitForRelease = useRef(false);
+
+  const orbitRef = useRef<any>(null);
+  const emptyPinch = useRef<{ handLabel: string; lastX: number; lastY: number } | null>(null);
+  const ROTATE_SPEED = 3.2;
 
   const [grabbedObject, setGrabbedObject] = useState<string | null>(null);
   const [isScaling, setIsScaling] = useState(false);
@@ -356,7 +258,7 @@ function Scene({
 
   const select = (target: GrabTarget | null) => {
     selected.current = target;
-    onSelectedChange(target ? targetKey(target) : null);
+    onSelectedChange(target ? target.id : null);
   };
 
   const releaseGrab = () => {
@@ -370,32 +272,15 @@ function Scene({
     if (!session) return;
     scaleSession.current = null;
     setIsScaling(false);
-
-    // Keep the new size. Cube/sphere keep it on the mesh; AI objects
-    // also save it to the store so the AI sees the real size.
-    if (session.target.type === 'dynamic') {
-      scaleObject(session.target.id, session.target.mesh.scale.x);
-    }
+    scaleObject(session.target.id, session.target.mesh.scale.x);
   };
 
-  useFrame((_, delta) => {
-    const scalingMesh = scaleSession.current?.target.mesh;
-
-    if (
-      cubeRef.current &&
-      activeGrab.current?.mesh !== cubeRef.current &&
-      scalingMesh !== cubeRef.current
-    ) {
-      cubeRef.current.rotation.x += delta * 0.4;
-      cubeRef.current.rotation.y += delta * 0.6;
-    }
-
+  useFrame(() => {
     const currentHands = handsRef.current;
     const currentScaling = scalingRef.current;
 
-    // Drop the selection if its AI object was deleted.
     const sel = selected.current;
-    if (sel?.type === 'dynamic' && !dynamicMeshRefs.current.has(sel.id)) {
+    if (sel && !dynamicMeshRefs.current.has(sel.id)) {
       if (scaleSession.current?.target === sel) {
         scaleSession.current = null;
         setIsScaling(false);
@@ -403,14 +288,9 @@ function Scene({
       select(null);
     }
 
-    // ------------------------------------------
-    // TWO-HAND SCALING (takes priority over one-hand drag)
-    // ------------------------------------------
-
     const scalingActive = currentScaling?.active === true && currentHands.length >= 2;
 
     if (scalingActive) {
-      // One-hand dragging must not fight with scaling.
       releaseGrab();
       waitForRelease.current = true;
 
@@ -426,11 +306,7 @@ function Scene({
       const factor = currentScaling.scale_factor;
 
       if (session && Number.isFinite(factor) && factor > 0) {
-        const targetScale = MathUtils.clamp(
-          session.initialScale * factor,
-          MIN_SCALE,
-          MAX_SCALE,
-        );
+        const targetScale = MathUtils.clamp(session.initialScale * factor, MIN_SCALE, MAX_SCALE);
         const mesh = session.target.mesh;
         mesh.scale.setScalar(MathUtils.lerp(mesh.scale.x, targetScale, SCALE_SMOOTHING));
       }
@@ -439,12 +315,7 @@ function Scene({
       return;
     }
 
-    // Scaling ended (active: false, a hand left, or the backend disconnected).
     endScaling();
-
-    // ------------------------------------------
-    // ONE-HAND GRAB / DRAG / RELEASE (unchanged behavior)
-    // ------------------------------------------
 
     const grab = activeGrab.current;
 
@@ -476,48 +347,61 @@ function Scene({
     }
 
     const sameHand = previousHandLabel.current === hand.hand;
-    const pinchStarted =
-      pinching && (!previousPinching.current || !sameHand) && !waitForRelease.current;
+    const pinchStarted = pinching && (!previousPinching.current || !sameHand) && !waitForRelease.current;
 
     if (pinchStarted && !activeGrab.current) {
       const dynamicEntries = Array.from(dynamicMeshRefs.current.entries());
-      const meshes = [
-        cubeRef.current,
-        sphereRef.current,
-        ...dynamicEntries.map(([, mesh]) => mesh),
-      ].filter((mesh): mesh is Mesh => mesh !== null);
+      const meshes = dynamicEntries.map(([, mesh]) => mesh);
 
       const intersections = raycaster.current.intersectObjects(meshes, false);
 
       if (intersections.length > 0) {
         const hit = intersections[0];
         const mesh = hit.object as Mesh;
+        const found = dynamicEntries.find(([, m]) => m === mesh);
 
-        const normal = camera.getWorldDirection(new Vector3());
-        const plane = new Plane();
-        plane.setFromNormalAndCoplanarPoint(normal, mesh.position);
-        const offset = hit.point.clone().sub(mesh.position);
+        if (found) {
+          const normal = camera.getWorldDirection(new Vector3());
+          const plane = new Plane();
+          plane.setFromNormalAndCoplanarPoint(normal, mesh.position);
+          const offset = hit.point.clone().sub(mesh.position);
 
-        let target: GrabTarget;
-        if (mesh === cubeRef.current) {
-          target = { type: 'cube', mesh };
-        } else if (mesh === sphereRef.current) {
-          target = { type: 'sphere', mesh };
-        } else {
-          const found = dynamicEntries.find(([, m]) => m === mesh);
-          target = { type: 'dynamic', id: found![0], mesh };
+          const target: GrabTarget = { id: found[0], mesh };
+
+          activeGrab.current = {
+            ...target,
+            handLabel: hand.hand,
+            plane,
+            offset,
+          };
+
+          setGrabbedObject(target.id);
+          select(target);
         }
-
-        activeGrab.current = {
-          ...target,
-          handLabel: hand.hand,
-          plane,
-          offset,
-        };
-
-        setGrabbedObject(targetKey(target));
-        select(target); // grabbing an object also selects it for scaling
+      } else {
+        emptyPinch.current = { handLabel: hand.hand, lastX: position.x, lastY: position.y };
       }
+    }
+
+    if (emptyPinch.current && pinching && hand.hand === emptyPinch.current.handLabel) {
+      const dx = position.x - emptyPinch.current.lastX;
+      const dy = position.y - emptyPinch.current.lastY;
+      emptyPinch.current.lastX = position.x;
+      emptyPinch.current.lastY = position.y;
+
+      const controls = orbitRef.current;
+      if (controls) {
+        const offsetVec = camera.position.clone().sub(controls.target);
+        const spherical = new Spherical().setFromVector3(offsetVec);
+        spherical.theta -= dx * ROTATE_SPEED;
+        spherical.phi = MathUtils.clamp(spherical.phi - dy * ROTATE_SPEED, 0.15, Math.PI - 0.15);
+        offsetVec.setFromSpherical(spherical);
+        camera.position.copy(controls.target).add(offsetVec);
+        camera.lookAt(controls.target);
+        controls.update();
+      }
+    } else if (!pinching) {
+      emptyPinch.current = null;
     }
 
     if (activeGrab.current && pinching) {
@@ -529,13 +413,11 @@ function Scene({
         const target = intersection.sub(currentGrab.offset);
         currentGrab.mesh.position.lerp(target, 0.35);
 
-        if (currentGrab.type === 'dynamic') {
-          moveObject(currentGrab.id, [
-            currentGrab.mesh.position.x,
-            currentGrab.mesh.position.y,
-            currentGrab.mesh.position.z,
-          ]);
-        }
+        moveObject(currentGrab.id, [
+          currentGrab.mesh.position.x,
+          currentGrab.mesh.position.y,
+          currentGrab.mesh.position.z,
+        ]);
       }
     }
 
@@ -548,29 +430,10 @@ function Scene({
       <color attach="background" args={['#0f1115']} />
 
       <ambientLight intensity={0.4} />
-      <directionalLight
-        position={[5, 8, 5]}
-        intensity={1.2}
-        castShadow
-        shadow-mapSize={[1024, 1024]}
-      />
+      <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow shadow-mapSize={[1024, 1024]} />
       <pointLight position={[-4, 3, -2]} intensity={0.5} color="#7aa2ff" />
       <Environment preset="city" />
 
-      <Cube
-        meshRef={cubeRef}
-        position={[-1.2, 0.5, 0]}
-        color="#e94560"
-        grabbed={grabbedObject === 'cube'}
-        selected={selectedObject === 'cube'}
-      />
-      <Sphere
-        meshRef={sphereRef}
-        position={[1.2, 0.6, 0]}
-        color="#4cc9f0"
-        grabbed={grabbedObject === 'sphere'}
-        selected={selectedObject === 'sphere'}
-      />
       <Ground />
       <Grid
         position={[0, 0.001, 0]}
@@ -581,7 +444,6 @@ function Scene({
         infiniteGrid
       />
 
-      {/* AI-created objects, also grabbable via hand gestures */}
       {objects.map((obj) => (
         <DynamicObject
           key={obj.id}
@@ -592,25 +454,42 @@ function Scene({
         />
       ))}
 
-      <OrbitControls makeDefault enabled={grabbedObject === null && !isScaling} />
+      {selectedObject && dynamicMeshRefs.current.get(selectedObject) && (
+        <TransformControls
+          object={dynamicMeshRefs.current.get(selectedObject)!}
+          mode={transformMode}
+          translationSnap={snap.enabled ? snap.translateSnap : null}
+          rotationSnap={snap.enabled ? snap.rotateSnap : null}
+          scaleSnap={snap.enabled ? snap.scaleSnap : null}
+          onMouseDown={() => {
+            if (orbitRef.current) orbitRef.current.enabled = false;
+          }}
+          onMouseUp={() => {
+            if (orbitRef.current) orbitRef.current.enabled = true;
+            const mesh = dynamicMeshRefs.current.get(selectedObject);
+            if (mesh) {
+              moveObject(selectedObject, [mesh.position.x, mesh.position.y, mesh.position.z]);
+              rotateObject(selectedObject, [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z]);
+              scaleObject(selectedObject, mesh.scale.x);
+            }
+          }}
+        />
+      )}
+
+      <OrbitControls ref={orbitRef} makeDefault enabled={grabbedObject === null && !isScaling} />
     </>
   );
 }
 
-// ==========================================
-// MAIN APP
-// ==========================================
-
 export default function App() {
   const { hands, connected, error, scaling } = useHandTracking();
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const objects = useSceneStore((s) => s.objects);
 
-  // Friendly name for the overlay (AI objects show their shape, not their id)
-  const selectedLabel =
-    selectedObject === null || selectedObject === 'cube' || selectedObject === 'sphere'
-      ? selectedObject
-      : (objects.find((o) => o.id === selectedObject)?.shape ?? null);
+  const selectedLabel = selectedObject
+    ? objects.find((o) => o.id === selectedObject)?.shape ?? null
+    : null;
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
@@ -622,7 +501,6 @@ export default function App() {
         selectedObject={selectedLabel}
       />
 
-      {/* Hand skeletons + a cursor between thumb and index of each hand */}
       <HandSkeletons hands={hands} scaling={scaling} />
 
       <Canvas shadows camera={{ position: [4, 3, 5], fov: 50 }}>
@@ -631,8 +509,20 @@ export default function App() {
           scaling={scaling}
           selectedObject={selectedObject}
           onSelectedChange={setSelectedObject}
+          transformMode={transformMode}
         />
       </Canvas>
+
+      <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 10, display: 'flex', gap: 6 }}>
+        <button onClick={() => setTransformMode('translate')}>Move</button>
+        <button onClick={() => setTransformMode('rotate')}>Rotate</button>
+        <button onClick={() => setTransformMode('scale')}>Scale</button>
+      </div>
+
+      <Inspector selectedId={selectedObject} />
+
+      <SnapPanel />
+      <BooleanPanel />
 
       <ChatBox />
     </div>
