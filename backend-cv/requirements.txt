@@ -1,0 +1,7 @@
+
+flask>=3.0,<4.0
+flask-socketio>=5.3,<6.0
+eventlet>=0.36,<0.41
+opencv-python>=4.8,<5.0
+mediapipe>=0.10.20,<0.11
+numpy>=1.26,<3.0
