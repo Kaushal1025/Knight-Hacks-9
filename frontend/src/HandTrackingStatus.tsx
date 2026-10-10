@@ -1,16 +1,20 @@
 
-import type { HandData } from './hooks/useHandTracking';
+import type { HandData, ScalingData } from './hooks/useHandTracking';
 
 type Props = {
   hands: HandData[];
   connected: boolean;
   error: string;
+  scaling: ScalingData | null;
+  selectedObject: string | null;
 };
 
 export default function HandTrackingStatus({
   hands,
   connected,
   error,
+  scaling,
+  selectedObject,
 }: Props) {
   return (
     <div
@@ -42,6 +46,14 @@ export default function HandTrackingStatus({
           {hand.hand}: {hand.gesture}
         </p>
       ))}
+
+      <p>Selected: {selectedObject ?? 'none'}</p>
+
+      {scaling?.active && (
+        <p style={{ color: '#ffd166' }}>
+          Scaling: {scaling.scale_factor.toFixed(2)}×
+        </p>
+      )}
 
       {error && (
         <p style={{ color: '#ff5555' }}>
