@@ -166,6 +166,41 @@ previous_pinch = {
 }
 
 
+# ==========================================
+# HAND POSITION SMOOTHING
+# ==========================================
+
+SMOOTHING_ALPHA = 0.4
+
+previous_positions = {}
+
+
+def smooth_position(label, current_position):
+    previous = previous_positions.get(label)
+
+    if previous is None:
+        previous_positions[label] = current_position.copy()
+        return current_position.copy()
+
+    smoothed = {
+        "x": (
+            SMOOTHING_ALPHA * current_position["x"] +
+            (1 - SMOOTHING_ALPHA) * previous["x"]
+        ),
+        "y": (
+            SMOOTHING_ALPHA * current_position["y"] +
+            (1 - SMOOTHING_ALPHA) * previous["y"]
+        ),
+        "z": (
+            SMOOTHING_ALPHA * current_position["z"] +
+            (1 - SMOOTHING_ALPHA) * previous["z"]
+        )
+    }
+
+    previous_positions[label] = smoothed
+
+    return smoothed
+
 def process_gestures(hands):
     visible_hands = set()
 
@@ -183,6 +218,8 @@ def process_gestures(hands):
             "y": (thumb["y"] + index["y"]) / 2,
             "z": (thumb["z"] + index["z"]) / 2
         }
+        # Smooth the cursor position
+        position = smooth_position(label, position)
 
         distance = pinch_distance(landmarks)
 
@@ -229,9 +266,63 @@ def process_gestures(hands):
     for label in previous_pinch:
         if label not in visible_hands:
             previous_pinch[label] = False
+            previous_positions.pop(label, None)
 
     return hands
 
+
+# ==========================================
+# TWO-HAND SCALING DETECTION
+# ==========================================
+
+scaling_active = False
+initial_hand_distance = None
+
+def process_two_hand_scaling(hands):
+    global scaling_active, initial_hand_distance
+
+    # Require two visible hands, both pinching
+    if len(hands) != 2 or not all(
+        hand["pinching"] for hand in hands
+    ):
+        scaling_active = False
+        initial_hand_distance = None
+
+        return {
+            "active": False,
+            "scale_factor": 1.0
+        }
+
+    # Measure distance between pinch midpoints
+    p1 = hands[0]["position"]
+    p2 = hands[1]["position"]
+
+    distance = math.sqrt(
+        (p1["x"] - p2["x"]) ** 2 +
+        (p1["y"] - p2["y"]) ** 2
+    )
+
+    # First frame of scaling
+    if not scaling_active:
+        scaling_active = True
+        initial_hand_distance = max(
+            distance, 0.01
+        )
+
+        print("Scaling started!", flush=True)
+
+    scale_factor = distance / initial_hand_distance
+
+    # Limit scaling range per gesture
+    scale_factor = max(
+        0.3,
+        min(3.0, scale_factor)
+    )
+
+    return {
+        "active": True,
+        "scale_factor": round(scale_factor, 3)
+    }
 
 # ==========================================
 # 7. DRAW HAND LANDMARKS
@@ -419,12 +510,16 @@ def camera_loop():
                 # Detect gestures and hand positions
                 hands = process_gestures(hands)
 
+                # Detect two-hand scaling
+                scaling = process_two_hand_scaling(hands)
+
                 # Send data to React frontend
                 socketio.emit(
                     "hand_data",
                     {
                         "timestamp": timestamp,
-                        "hands": hands
+                        "hands": hands,
+                        "scaling": scaling
                     }
                 )
 
