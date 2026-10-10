@@ -336,10 +336,14 @@ def draw_gesture_status(frame, hands):
 def camera_loop():
     print("Starting webcam...", flush=True)
 
-    cap = cv2.VideoCapture(
-        0,
-        cv2.CAP_DSHOW
-    )
+    import platform
+
+    if platform.system() == "Darwin":
+        cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+    elif platform.system() == "Windows":
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print(
@@ -436,15 +440,6 @@ def camera_loop():
                     hands
                 )
 
-                # Display webcam
-                cv2.imshow(
-                    "ShapeShift Hand Tracking",
-                    frame
-                )
-
-                # Press Q to close webcam
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
 
     except Exception as error:
         print(
@@ -455,7 +450,6 @@ def camera_loop():
 
     finally:
         cap.release()
-        cv2.destroyAllWindows()
 
         print(
             "Webcam stopped.",
