@@ -43,10 +43,10 @@ const SCALE_SMOOTHING = 0.35;
 // twist = ROTATE (around the vertical axis, like a turntable).
 // ==========================================
 
-/** Size change (from the backend's scale factor) that locks SCALE mode. */
-const SCALE_LOCK_THRESHOLD = 0.15;
+/** Size change (hand distance, measured here) that locks SCALE mode. */
+const SCALE_LOCK_THRESHOLD = 0.2;
 /** Twist angle that locks ROTATE mode. */
-const ROTATE_LOCK_THRESHOLD = MathUtils.degToRad(15);
+const ROTATE_LOCK_THRESHOLD = MathUtils.degToRad(10);
 /** Rotation snaps to these steps (also hides tracking wobble). */
 const ROTATE_STEP = MathUtils.degToRad(15);
 /** Flip to -1 if twisting clockwise turns objects the wrong way. */
@@ -54,7 +54,7 @@ const ROTATE_DIRECTION = 1;
 const ROTATE_SMOOTHING = 0.35;
 
 type TwoHandMode = 'pending' | 'scale' | 'rotate';
-type TwoHandInfo = { mode: TwoHandMode; degrees: number } | null;
+type TwoHandInfo = { mode: TwoHandMode; degrees: number; scale: number } | null;
 
 /** Angle of the line from the left hand to the right hand, in screen space. */
 function twoHandAngle(hands: HandData[]): number | null {
@@ -65,6 +65,18 @@ function twoHandAngle(hands: HandData[]): number | null {
     right.position.y - left.position.y,
     (right.position.x - left.position.x) * WEBCAM_ASPECT,
   );
+}
+
+/**
+ * Distance between the two hands with the webcam's 4:3 shape corrected.
+ * (The backend's scale factor skips this correction, so twisting your hands
+ * toward vertical looked like spreading them: up to +33%. We measure it here.)
+ */
+function twoHandDistance(hands: HandData[]): number | null {
+  if (hands.length < 2) return null;
+  const [a, b] = hands;
+  const d = Math.hypot((b.position.x - a.position.x) * WEBCAM_ASPECT, b.position.y - a.position.y);
+  return d > 0.01 ? d : null;
 }
 
 /** Smallest signed difference between two angles, in [-PI, PI]. */
@@ -535,7 +547,7 @@ function DynamicObject({
 // CHAT BOX
 // ==========================================
 
-function ChatBox() {
+function ChatBox({ selectedId }: { selectedId: string | null }) {
   const [input, setInput] = useState('');
   const [reply, setReply] = useState('');
   const [loading, setLoading] = useState(false);
@@ -545,7 +557,7 @@ function ChatBox() {
     setInput(text); // show what's being sent (useful for voice)
     setLoading(true);
     try {
-      const message = await sendChatMessage(text);
+      const message = await sendChatMessage(text, selectedId);
       setReply(message);
     } catch (err) {
       setReply('Error reaching AI backend. Is it running on localhost:3001?');
@@ -680,8 +692,12 @@ type ScaleSession = {
   mode: TwoHandMode;
   startAngle: number | null;
   initialRotationY: number;
-  /** Backend scale factor at the moment SCALE locked (so it doesn't jump) */
+  /** Hand distance when both hands started pinching */
+  startDistance: number | null;
+  /** Scale factor at the moment SCALE locked (so it doesn't jump) */
   scaleFactorAtLock: number;
+  /** Last reported scale, to avoid re-rendering every frame */
+  reportedScale: number;
   /** Last reported rotation step, to avoid re-rendering every frame */
   reportedDegrees: number;
   /** Rotation the object is heading to (exact step), applied on release */
@@ -855,6 +871,8 @@ function Scene({
           initialScale: scalingMesh.scale.x,
           mode: 'pending',
           startAngle: twoHandAngle(currentHands),
+          startDistance: twoHandDistance(currentHands),
+          reportedScale: 1,
           initialRotationY: scalingMesh.rotation.y,
           scaleFactorAtLock: 1,
           reportedDegrees: 0,
@@ -866,11 +884,16 @@ function Scene({
           ),
         };
         setIsScaling(true);
-        onTwoHandChange({ mode: 'pending', degrees: 0 });
+        onTwoHandChange({ mode: 'pending', degrees: 0, scale: 1 });
       }
 
       const session = scaleSession.current;
-      const factor = currentScaling.scale_factor;
+      // Our own aspect-corrected scale factor (falls back to the backend's)
+      const distance = twoHandDistance(currentHands);
+      const factor =
+        session && session.startDistance !== null && distance !== null
+          ? distance / session.startDistance
+          : currentScaling.scale_factor;
       const angle = twoHandAngle(currentHands);
       const twist =
         session && session.startAngle !== null && angle !== null
@@ -885,7 +908,7 @@ function Scene({
           session.mode = 'scale';
           session.scaleFactorAtLock = factor;
         }
-        if (session.mode !== 'pending') onTwoHandChange({ mode: session.mode, degrees: 0 });
+        if (session.mode !== 'pending') onTwoHandChange({ mode: session.mode, degrees: 0, scale: 1 });
       }
 
       if (session && session.mode === 'rotate') {
@@ -897,7 +920,7 @@ function Scene({
         const degrees = Math.round(MathUtils.radToDeg(steps * ROTATE_STEP));
         if (degrees !== session.reportedDegrees) {
           session.reportedDegrees = degrees;
-          onTwoHandChange({ mode: 'rotate', degrees });
+          onTwoHandChange({ mode: 'rotate', degrees, scale: 1 });
         }
       }
 
@@ -909,6 +932,11 @@ function Scene({
         );
         const mesh = session.target.mesh;
         mesh.scale.setScalar(MathUtils.lerp(mesh.scale.x, targetScale, SCALE_SMOOTHING));
+        const shown = Math.round((targetScale / session.initialScale) * 20) / 20; // 0.05 steps
+        if (shown !== session.reportedScale) {
+          session.reportedScale = shown;
+          onTwoHandChange({ mode: 'scale', degrees: 0, scale: shown });
+        }
 
         // Growing into another object pushes this one out instead of overlapping
         const others = Array.from(dynamicMeshRefs.current.values()).filter(
@@ -1331,7 +1359,7 @@ export default function App() {
         onUndoPoint={() => setExtrudePoints((pts) => pts.slice(0, -1))}
       />
 
-      <ChatBox />
+      <ChatBox selectedId={selectedObject} />
     </div>
   );
 }
