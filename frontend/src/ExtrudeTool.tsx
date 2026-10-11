@@ -53,7 +53,7 @@ export default function ExtrudeTool({
       style={{
         position: 'absolute',
         top: 20,
-        right: 20,
+        right: 260,
         zIndex: 10,
         display: 'flex',
         flexDirection: 'column',

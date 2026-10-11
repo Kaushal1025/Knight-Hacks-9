@@ -725,7 +725,7 @@ export default function App() {
         />
       </Canvas>
 
-      <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 10, display: 'flex', gap: 6 }}>
+      <div style={{ position: 'absolute', bottom: 20, left: 20, zIndex: 10, display: 'flex', gap: 6 }}>
         <button onClick={() => setTransformMode('translate')}>Move</button>
         <button onClick={() => setTransformMode('rotate')}>Rotate</button>
         <button onClick={() => setTransformMode('scale')}>Scale</button>
