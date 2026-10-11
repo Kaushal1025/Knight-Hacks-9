@@ -68,14 +68,15 @@ const tools = [
   },
   {
     name: "rotate_object",
-    description: "Rotate an object (in degrees)",
+    description:
+      "Rotate an object BY the given number of degrees (relative to its current rotation; omit or use 0 for axes that shouldn't change). The viewer looks at the scene from the front. Turn/spin left = positive ry, turn/spin right or clockwise (seen from above) = negative ry. Tip/tilt forward (top toward the viewer) = positive rx, tilt back = negative rx. Roll/lean left = positive rz, lean right = negative rz. If no amount is given, use 45 degrees. Upside down = 180 degrees around rx.",
     input_schema: {
       type: "object",
       properties: {
         object_id: { type: "string" },
-        rx: { type: "number" },
-        ry: { type: "number" },
-        rz: { type: "number" },
+        rx: { type: "number", description: "Degrees to tilt forward (+) / back (-)" },
+        ry: { type: "number", description: "Degrees to turn left (+) / right (-) around the vertical axis" },
+        rz: { type: "number", description: "Degrees to roll/lean left (+) / right (-)" },
       },
       required: ["object_id"],
     },
@@ -168,7 +169,7 @@ export async function chat(userMessage, conversationHistory = [], scene = []) {
   ];
 
   const sceneContext = scene.length > 0
-    ? `\n\nCurrent scene objects:\n${JSON.stringify(scene, null, 2)}\n\nWhen the user refers to an existing object ("the red cube", "it", "that sphere"), find its matching object_id from this list and use that exact id in move_object/rotate_object/scale_object/delete_object/change_color calls. Never invent an object_id.`
+    ? `\n\nCurrent scene objects:\n${JSON.stringify(scene, null, 2)}\n\nWhen the user refers to an existing object ("the red cube", "it", "that sphere"), find its matching object_id from this list and use that exact id. "it"/"this"/"that" with no other description means the object marked "selected": true; rotation values are in degrees. Use that exact id in move_object/rotate_object/scale_object/delete_object/change_color calls. Never invent an object_id.`
     : "\n\nThe scene is currently empty.";
 
   const response = await client.messages.create({
