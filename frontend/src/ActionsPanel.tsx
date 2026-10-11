@@ -33,24 +33,28 @@ export default function ActionsPanel({
   };
 
   const buttonStyle: React.CSSProperties = {
-    padding: '6px 14px',
-    borderRadius: 6,
+    padding: '12px 0',
+    borderRadius: 8,
     border: '1px solid #444',
     background: '#2a2f3a',
     color: '#fff',
-    fontSize: 12,
+    fontSize: 14,
     cursor: 'pointer',
+    width: '100%',
+    boxSizing: 'border-box',
   };
 
   return (
-    <div
+        <div
       style={{
         position: 'absolute',
-        bottom: 180,
+        bottom: 380,
         right: 20,
         zIndex: 10,
-        display: 'flex',
+        display: 'grid',
+        gridTemplateColumns: 'repeat(2, 1fr)',
         gap: 8,
+        width: 220,
       }}
     >
       <button onClick={saveSceneToFile} style={buttonStyle} title="Download this scene as a file">

@@ -35,7 +35,7 @@ export default function HandTrackingStatus({
         pointerEvents: 'none',
       }}
     >
-      <h3>ShapeShift CV</h3>
+      <h3>GestureLab</h3>
 
       <p>
         Backend: {

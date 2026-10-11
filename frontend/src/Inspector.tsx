@@ -1,7 +1,7 @@
 import { useSceneStore } from './store/sceneStore';
 
 const fieldStyle: React.CSSProperties = {
-  width: 64,
+  width: 56,
   padding: '4px 6px',
   borderRadius: 6,
   border: '1px solid #444',
@@ -29,7 +29,7 @@ function Vec3Row({
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ fontSize: 12, color: '#cfd3dc', marginBottom: 4 }}>{label}</div>
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 6 }}>
         {(['X', 'Y', 'Z'] as const).map((axis, i) => (
           <div key={axis}>
             <label style={labelStyle}>{axis}</label>

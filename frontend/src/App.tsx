@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Environment, TransformControls, useGLTF, Line } from '@react-three/drei';
-import SnapPanel from './SnapPanel';
 import ActionsPanel from './ActionsPanel';
 import ExtrudeTool, { buildExtrudeGeometry } from './ExtrudeTool';
 
@@ -602,8 +601,8 @@ function ChatBox({ selectedId }: { selectedId: string | null }) {
     <div
       style={{
         position: 'absolute',
-        bottom: 20,
-        left: 20,
+        bottom: 200,
+        right: 20,
         zIndex: 10,
         width: 360,
         fontFamily: 'sans-serif',
@@ -1382,15 +1381,9 @@ export default function App() {
         />
       </Canvas>
 
-      <div style={{ position: 'absolute', bottom: 20, left: 20, zIndex: 10, display: 'flex', gap: 6 }}>
-        <button onClick={() => setTransformMode('translate')}>Move</button>
-        <button onClick={() => setTransformMode('rotate')}>Rotate</button>
-        <button onClick={() => setTransformMode('scale')}>Scale</button>
-      </div>
-
       <Inspector selectedId={inspectorId} />
 
-      <SnapPanel />
+      
       <ActionsPanel selectedId={inspectorId} onSelectedChange={setSelectedObject} />
       <ExtrudeTool
         active={extrudeActive}
