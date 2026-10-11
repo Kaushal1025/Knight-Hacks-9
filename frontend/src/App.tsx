@@ -37,6 +37,58 @@ const SCALE_SMOOTHING = 0.35;
 const SELECTED_EMISSIVE = '#ffd166';
 
 // ==========================================
+// BOUNDS: objects stay on the ground plane
+// (not below the floor, not past its edges)
+// ==========================================
+
+/** Height of the ground/grid. Nothing may extend below this. */
+const FLOOR_Y = 0;
+/** Half the ground plane's width: the plane is 20 x 20, centred on the origin. */
+const FLOOR_HALF_SIZE = 10;
+const BOUNDS_EPSILON = 1e-4;
+
+/** How far to shift [min, max] so it fits inside [-limit, limit] (centres it if too big). */
+function shiftInto(min: number, max: number, limit: number): number {
+  if (max - min >= 2 * limit) return -(min + max) / 2;
+  if (min < -limit) return -limit - min;
+  if (max > limit) return limit - max;
+  return 0;
+}
+
+/**
+ * Move the object the smallest amount needed so all of it is above the floor
+ * and inside the ground's edges. Returns true if it moved.
+ */
+function keepInsideBounds(mesh: Mesh, box: Box3): boolean {
+  box.setFromObject(mesh);
+  if (box.isEmpty()) return false;
+
+  const dy = Math.max(0, FLOOR_Y - box.min.y);
+  const dx = shiftInto(box.min.x, box.max.x, FLOOR_HALF_SIZE);
+  const dz = shiftInto(box.min.z, box.max.z, FLOOR_HALF_SIZE);
+
+  if (
+    Math.abs(dx) <= BOUNDS_EPSILON &&
+    dy <= BOUNDS_EPSILON &&
+    Math.abs(dz) <= BOUNDS_EPSILON
+  ) {
+    return false;
+  }
+  mesh.position.x += dx;
+  mesh.position.y += dy;
+  mesh.position.z += dz;
+  return true;
+}
+
+/** Update an object's stored position without adding an undo step. */
+function syncStoredPosition(id: string, mesh: Mesh) {
+  const { x, y, z } = mesh.position;
+  useSceneStore.setState((s) => ({
+    objects: s.objects.map((o) => (o.id === id ? { ...o, position: [x, y, z] } : o)),
+  }));
+}
+
+// ==========================================
 // GROUND
 // ==========================================
 
@@ -411,6 +463,11 @@ function Scene({
   const [grabbedObject, setGrabbedObject] = useState<string | null>(null);
   const [isScaling, setIsScaling] = useState(false);
 
+  // Floor guard state
+  const floorBox = useRef(new Box3());
+  const needsFloorSync = useRef(new Set<string>());
+  const gizmoDragging = useRef(false);
+
   useEffect(() => {
     handsRef.current = hands;
   }, [hands]);
@@ -598,6 +655,7 @@ function Scene({
       if (hasIntersection) {
         const target = intersection.sub(currentGrab.offset);
         currentGrab.mesh.position.lerp(target, 0.35);
+        keepInsideBounds(currentGrab.mesh, floorBox.current); // slide along floor/edges, never through
 
         if (currentGrab.type === 'dynamic') {
           moveObject(currentGrab.id, [
@@ -611,6 +669,31 @@ function Scene({
 
     previousPinching.current = pinching;
     previousHandLabel.current = hand.hand;
+  });
+
+  // Bounds guard. Registered after the main useFrame so it runs after this frame's
+  // drag/scale updates and before rendering: anything below the floor or past the
+  // ground's edges is pushed back inside (dragging into an edge slides along it).
+  useFrame(() => {
+    const draggedMesh = activeGrab.current?.mesh;
+    const scalingMesh = scaleSession.current?.target.mesh;
+
+    for (const [id, mesh] of dynamicMeshRefs.current) {
+      if (keepInsideBounds(mesh, floorBox.current)) {
+        needsFloorSync.current.add(id);
+      }
+
+      // Save the corrected height once nothing is actively moving the object
+      // (hand drag, two-hand scale, gizmo), so Undo/Save/AI see where it really is.
+      const busy =
+        mesh === draggedMesh ||
+        mesh === scalingMesh ||
+        (gizmoDragging.current && id === selectedObject);
+      if (!busy && needsFloorSync.current.has(id)) {
+        needsFloorSync.current.delete(id);
+        syncStoredPosition(id, mesh);
+      }
+    }
   });
 
   return (
@@ -681,9 +764,11 @@ function Scene({
             rotationSnap={snap.enabled ? snap.rotateSnap : null}
             scaleSnap={snap.enabled ? snap.scaleSnap : null}
             onMouseDown={() => {
+              gizmoDragging.current = true;
               if (orbitRef.current) orbitRef.current.enabled = false;
             }}
             onMouseUp={() => {
+              gizmoDragging.current = false;
               if (orbitRef.current) orbitRef.current.enabled = true;
               const mesh = dynamicMeshRefs.current.get(selectedObject!);
               if (mesh) {
