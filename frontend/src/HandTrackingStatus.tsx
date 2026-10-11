@@ -8,7 +8,7 @@ type Props = {
   scaling: ScalingData | null;
   selectedObject: string | null;
   snapKind?: 'grid' | 'object' | null;
-  twoHand?: { mode: 'pending' | 'scale' | 'rotate'; degrees: number; scale: number } | null;
+  twoHand?: { mode: 'pending' | 'scale' | 'rotate'; degrees: number; tilt: number; scale: number } | null;
 };
 
 export default function HandTrackingStatus({
@@ -60,11 +60,15 @@ export default function HandTrackingStatus({
       )}
 
       {twoHand?.mode === 'pending' && (
-        <p style={{ color: '#ffd166' }}>Two hands: spread to scale, twist to rotate</p>
+        <p style={{ color: '#ffd166' }}>
+          Two hands: spread to scale, twist to turn, move up/down to tilt
+        </p>
       )}
 
       {twoHand?.mode === 'rotate' && (
-        <p style={{ color: '#ffd166' }}>Rotating: {twoHand.degrees}°</p>
+        <p style={{ color: '#ffd166' }}>
+          Rotating: turn {twoHand.degrees}°, tilt {twoHand.tilt}°
+        </p>
       )}
 
       {scaling?.active && !twoHand && (
