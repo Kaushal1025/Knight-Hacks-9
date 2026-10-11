@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Environment, TransformControls, useGLTF, Line } from '@react-three/drei';
 import SnapPanel from './SnapPanel';
-import BooleanPanel from './BooleanPanel';
 import ActionsPanel from './ActionsPanel';
 import ExtrudeTool, { buildExtrudeGeometry } from './ExtrudeTool';
 
@@ -15,6 +14,7 @@ import {
   Vector2,
   Vector3,
   Box3,
+  type Camera,
 } from 'three';
 
 import { useSceneStore, type SceneObject } from './store/sceneStore';
@@ -118,9 +118,10 @@ function depthFromHandSize(ratio: number): number {
 }
 
 // ==========================================
-// SNAP GESTURE: pinch with thumb + MIDDLE finger to grab with snapping.
-// Near another object it snaps flush against it (stack on top / side by side);
-// otherwise it snaps to the grid. A normal thumb + index pinch moves freely.
+// PINCH TYPES
+//  - Thumb + INDEX pinch: grab with snapping. Near another object it snaps flush
+//    against it (stack on top / side by side); otherwise it snaps to the grid.
+//  - Thumb + MIDDLE pinch: grab and move freely (no snapping).
 // ==========================================
 
 /** Same thresholds the CV backend uses for the index pinch (distance / hand size). */
@@ -270,6 +271,53 @@ function pushOutOfObjects(mesh: Mesh, others: Mesh[]): boolean {
     if (!changed) break;
   }
   return moved;
+}
+
+// ==========================================
+// CAMERA: pinch empty space and hold to move the view.
+//  - Move the hand left/right/up/down: rotate the view around the scene.
+//  - Push the hand toward the screen: zoom in. Pull it back: zoom out.
+// ==========================================
+
+/** Radians of rotation per full-screen hand movement. */
+const ROTATE_SPEED = 3.2;
+/** How strongly hand-size changes zoom (1 = 50% bigger hand -> ~1.4x closer). */
+const ZOOM_GAIN = 1.0;
+const CAMERA_MIN_DISTANCE = 2;
+const CAMERA_MAX_DISTANCE = 40;
+
+/** Hand-size ratio -> zoom multiplier (>1 = closer). Same deadzone as object depth. */
+function zoomFromHandSize(ratio: number): number {
+  const change = ratio - 1;
+  if (Math.abs(change) <= DEPTH_DEADZONE) return 1;
+  const beyond = change - Math.sign(change) * DEPTH_DEADZONE;
+  return Math.max(0.2, 1 + beyond * ZOOM_GAIN * DEPTH_DIRECTION);
+}
+
+type OrbitLike = { target: Vector3; update: () => void };
+const camOffset = new Vector3();
+const camSpherical = new Spherical();
+
+/**
+ * Rotate the view around the scene by a hand movement (dx, dy in normalized
+ * screen units) and set the camera's distance from the scene (zoom).
+ */
+function rotateAndZoomCamera(
+  camera: Camera,
+  controls: OrbitLike,
+  dx: number,
+  dy: number,
+  distance: number,
+) {
+  camOffset.copy(camera.position).sub(controls.target);
+  camSpherical.setFromVector3(camOffset);
+  camSpherical.theta -= dx * ROTATE_SPEED;
+  camSpherical.phi = MathUtils.clamp(camSpherical.phi - dy * ROTATE_SPEED, 0.15, Math.PI / 2 - 0.05);
+  camSpherical.radius = MathUtils.clamp(distance, CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
+  camOffset.setFromSpherical(camSpherical);
+  camera.position.copy(controls.target).add(camOffset);
+  camera.lookAt(controls.target);
+  controls.update();
 }
 
 /** Update an object's stored position without adding an undo step. */
@@ -664,8 +712,15 @@ function Scene({
   const scaleSession = useRef<ScaleSession | null>(null);
   const waitForRelease = useRef(false);
   const orbitRef = useRef<any>(null);
-  const emptyPinch = useRef<{ handLabel: string; lastX: number; lastY: number } | null>(null);
-  const ROTATE_SPEED = 3.2; // radians across a full-width drag — tune to taste
+  const emptyPinch = useRef<{
+    handLabel: string;
+    lastX: number;
+    lastY: number;
+    /** Zoom: hand size and camera distance when the pinch started */
+    startHandSize: number | null;
+    smoothedHandSize: number | null;
+    startDistance: number;
+  } | null>(null);
 
   const [grabbedObject, setGrabbedObject] = useState<string | null>(null);
   const [isScaling, setIsScaling] = useState(false);
@@ -808,9 +863,9 @@ function Scene({
     middlePinching.current =
       middleRatio !== null &&
       middleRatio < (middlePinching.current ? SNAP_PINCH_END : SNAP_PINCH_START);
-    const snapPinch = middlePinching.current && !hand.pinching;
+    const middlePinch = middlePinching.current && !hand.pinching;
 
-    const pinching = hand.pinching || snapPinch;
+    const pinching = hand.pinching || middlePinch;
     const position = hand.position;
 
     if (waitForRelease.current && !pinching) {
@@ -885,38 +940,44 @@ function Scene({
           startHandSize: size,
           smoothedHandSize: size,
           startPlaneConstant: plane.constant,
-          snap: snapPinch,
+          snap: hand.pinching, // index pinch snaps; middle pinch moves freely
         };
 
         setGrabbedObject(targetKey(target));
         select(target);
       } else {
-        // Pinched empty space — start orbiting the camera instead of grabbing.
-        emptyPinch.current = { handLabel: hand.hand, lastX: position.x, lastY: position.y };
+        // Pinched empty space: move the camera instead (rotate + zoom).
+        const size = handSize(hand);
+        const controls = orbitRef.current;
+        emptyPinch.current = {
+          handLabel: hand.hand,
+          lastX: position.x,
+          lastY: position.y,
+          startHandSize: size,
+          smoothedHandSize: size,
+          startDistance: controls ? camera.position.distanceTo(controls.target) : 8,
+        };
       }
     }
 
-    // Continue the orbit drag while that same hand keeps pinching.
+    // While holding empty space: move the hand to rotate the view,
+    // push it toward the screen to zoom in, pull it back to zoom out.
     if (emptyPinch.current && pinching && hand.hand === emptyPinch.current.handLabel) {
-      const dx = position.x - emptyPinch.current.lastX;
-      const dy = position.y - emptyPinch.current.lastY;
-      emptyPinch.current.lastX = position.x;
-      emptyPinch.current.lastY = position.y;
+      const held = emptyPinch.current;
+      const dx = position.x - held.lastX;
+      const dy = position.y - held.lastY;
+      held.lastX = position.x;
+      held.lastY = position.y;
 
       const controls = orbitRef.current;
       if (controls) {
-        const offsetVec = camera.position.clone().sub(controls.target);
-        const spherical = new Spherical().setFromVector3(offsetVec);
-        spherical.theta -= dx * ROTATE_SPEED;
-        spherical.phi = MathUtils.clamp(
-          spherical.phi - dy * ROTATE_SPEED,
-          0.15,
-          Math.PI - 0.15,
-        );
-        offsetVec.setFromSpherical(spherical);
-        camera.position.copy(controls.target).add(offsetVec);
-        camera.lookAt(controls.target);
-        controls.update();
+        let zoom = 1;
+        const size = handSize(hand);
+        if (size !== null && held.startHandSize !== null) {
+          held.smoothedHandSize = MathUtils.lerp(held.smoothedHandSize ?? size, size, DEPTH_SMOOTHING);
+          zoom = zoomFromHandSize(held.smoothedHandSize / held.startHandSize);
+        }
+        rotateAndZoomCamera(camera, controls, dx, dy, held.startDistance / zoom);
       }
     } else if (!pinching) {
       emptyPinch.current = null;
@@ -1165,7 +1226,6 @@ export default function App() {
 
       <SnapPanel />
       <ActionsPanel selectedId={inspectorId} onSelectedChange={setSelectedObject} />
-      <BooleanPanel />
       <ExtrudeTool
         active={extrudeActive}
         onToggle={() => setExtrudeActive((v) => !v)}
