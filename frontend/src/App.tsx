@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
-import type { RefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Environment, TransformControls, useGLTF } from '@react-three/drei';
 import SnapPanel from './SnapPanel';
@@ -34,70 +33,6 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
 const SCALE_SMOOTHING = 0.35;
 const SELECTED_EMISSIVE = '#ffd166';
-
-// ==========================================
-// SHAPE PROPS
-// ==========================================
-
-type ShapeProps = {
-  position: [number, number, number];
-  color: string;
-  meshRef: RefObject<Mesh | null>;
-  grabbed: boolean;
-  selected: boolean;
-};
-
-// ==========================================
-// CUBE
-// ==========================================
-
-function Cube({ position, color, meshRef, grabbed, selected }: ShapeProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <mesh
-      ref={meshRef}
-      position={position}
-      castShadow
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-    >
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial
-        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
-        emissive={selected ? SELECTED_EMISSIVE : '#000000'}
-        emissiveIntensity={selected ? 0.35 : 0}
-      />
-    </mesh>
-  );
-}
-
-// ==========================================
-// SPHERE
-// ==========================================
-
-function Sphere({ position, color, meshRef, grabbed, selected }: ShapeProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <mesh
-      ref={meshRef}
-      position={position}
-      castShadow
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-    >
-      <sphereGeometry args={[0.6, 32, 32]} />
-      <meshStandardMaterial
-        color={grabbed ? '#00ff88' : hovered ? '#ffffff' : color}
-        emissive={selected ? SELECTED_EMISSIVE : '#000000'}
-        emissiveIntensity={selected ? 0.35 : 0}
-        roughness={0.3}
-        metalness={0.2}
-      />
-    </mesh>
-  );
-}
 
 // ==========================================
 // GROUND
@@ -454,18 +389,7 @@ function Scene({
     }
   };
 
-  useFrame((_, delta) => {
-    const scalingMesh = scaleSession.current?.target.mesh;
-
-    if (
-      cubeRef.current &&
-      activeGrab.current?.mesh !== cubeRef.current &&
-      scalingMesh !== cubeRef.current
-    ) {
-      cubeRef.current.rotation.x += delta * 0.4;
-      cubeRef.current.rotation.y += delta * 0.6;
-    }
-
+  useFrame(() => {
     const currentHands = handsRef.current;
     const currentScaling = scalingRef.current;
 
@@ -651,20 +575,6 @@ function Scene({
       <pointLight position={[-4, 3, -2]} intensity={0.5} color="#7aa2ff" />
       <Environment preset="city" />
 
-      <Cube
-        meshRef={cubeRef}
-        position={[-1.2, 0.5, 0]}
-        color="#e94560"
-        grabbed={grabbedObject === 'cube'}
-        selected={selectedObject === 'cube'}
-      />
-      <Sphere
-        meshRef={sphereRef}
-        position={[1.2, 0.6, 0]}
-        color="#4cc9f0"
-        grabbed={grabbedObject === 'sphere'}
-        selected={selectedObject === 'sphere'}
-      />
       <Ground />
       <Grid
         position={[0, 0.001, 0]}
