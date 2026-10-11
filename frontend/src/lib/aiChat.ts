@@ -40,6 +40,22 @@ export async function sendChatMessage(message: string): Promise<string> {
       case 'change_color':
         store.changeColor(call.input.object_id, call.input.color);
         break;
+      case 'generate_model':
+        if (call.input.error) {
+          console.error('Model generation failed:', call.input.error);
+          break;
+        }
+        if (call.input.modelUrl) {
+          store.addObject({
+            id: crypto.randomUUID(),
+            shape: 'generated',
+            position: [call.input.x, call.input.y, call.input.z],
+            scale: call.input.size ?? 1,
+            color: '#ffffff',
+            modelUrl: call.input.modelUrl,
+          });
+        }
+        break;
     }
   }
 

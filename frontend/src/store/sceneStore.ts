@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { BufferGeometry, BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry, TorusGeometry } from 'three';
 import { Evaluator, Brush, ADDITION, SUBTRACTION, INTERSECTION } from 'three-bvh-csg';
 
-export type ShapeType = 'sphere' | 'cube' | 'cylinder' | 'cone' | 'torus' | 'custom';
+export type ShapeType = 'sphere' | 'cube' | 'cylinder' | 'cone' | 'torus' | 'custom' | 'generated';
 
 export interface SceneObject {
   id: string;
@@ -12,6 +12,7 @@ export interface SceneObject {
   scale: number;
   color: string;
   geometry?: BufferGeometry;
+  modelUrl?: string;
 }
 
 interface SnapSettings {
@@ -25,6 +26,7 @@ interface SceneStore {
   objects: SceneObject[];
   selectedIds: string[];
   snap: SnapSettings;
+  history: SceneObject[][];
   addObject: (obj: Omit<SceneObject, 'rotation'> & { rotation?: [number, number, number] }) => void;
   moveObject: (id: string, position: [number, number, number]) => void;
   rotateObject: (id: string, rotation: [number, number, number]) => void;
@@ -36,6 +38,7 @@ interface SceneStore {
   toggleSnap: (enabled: boolean) => void;
   setSnap: (partial: Partial<SnapSettings>) => void;
   booleanOp: (idA: string, idB: string, op: 'union' | 'subtract' | 'intersect') => void;
+  undo: () => void;
 }
 
 function applySnap(value: number, increment: number, enabled: boolean) {
@@ -43,18 +46,23 @@ function applySnap(value: number, increment: number, enabled: boolean) {
   return Math.round(value / increment) * increment;
 }
 
+const MAX_HISTORY = 50;
+
 export const useSceneStore = create<SceneStore>((set, get) => ({
   objects: [],
   selectedIds: [],
   snap: { enabled: false, translateSnap: 0.5, rotateSnap: 0.1, scaleSnap: 0.1 },
+  history: [],
 
   addObject: (obj) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: [...s.objects, { rotation: [0, 0, 0], ...obj }],
     })),
 
   moveObject: (id, position) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: s.objects.map((o) =>
         o.id === id
           ? {
@@ -69,6 +77,7 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
   rotateObject: (id, rotation) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: s.objects.map((o) =>
         o.id === id
           ? {
@@ -83,6 +92,7 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
   scaleObject: (id, scale) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: s.objects.map((o) =>
         o.id === id
           ? { ...o, scale: applySnap(scale, s.snap.scaleSnap, s.snap.enabled) }
@@ -92,12 +102,14 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
   deleteObject: (id) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: s.objects.filter((o) => o.id !== id),
       selectedIds: s.selectedIds.filter((sid) => sid !== id),
     })),
 
   changeColor: (id, color) =>
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: s.objects.map((o) => (o.id === id ? { ...o, color } : o)),
     })),
 
@@ -154,6 +166,7 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
     const resultId = crypto.randomUUID();
     set((s) => ({
+      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
       objects: [
         ...s.objects.filter((o) => o.id !== idA && o.id !== idB),
         {
@@ -169,4 +182,15 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
       selectedIds: [resultId],
     }));
   },
+
+  undo: () =>
+    set((s) => {
+      if (s.history.length === 0) return s;
+      const previous = s.history[s.history.length - 1];
+      return {
+        objects: previous,
+        history: s.history.slice(0, -1),
+        selectedIds: [],
+      };
+    }),
 }));

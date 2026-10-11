@@ -1,10 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
+import { fal } from "@fal-ai/client";
 
 dotenv.config();
 
 const client = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
+});
+
+fal.config({
+  credentials: process.env.FAL_KEY,
 });
 
 const tools = [
@@ -110,6 +115,25 @@ const tools = [
       required: ["object_id", "color"],
     },
   },
+  {
+    name: "generate_model",
+    description:
+      "Generate a custom 3D model from a text description when the user wants something that isn't a basic sphere/cube/cylinder/cone (e.g. 'make me a chess piece', 'generate a dragon', 'create a coffee mug'). This takes longer than creating a basic shape, so only use it when a basic shape clearly won't do.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "A clear, descriptive text prompt of what to generate",
+        },
+        x: { type: "number", description: "X position (-10 to 10)" },
+        y: { type: "number", description: "Y position (-10 to 10)" },
+        z: { type: "number", description: "Z position (-10 to 10)" },
+        size: { type: "number", description: "Size scale (0.5 to 5)" },
+      },
+      required: ["prompt", "x", "y", "z"],
+    },
+  },
 ];
 
 const systemPrompt = `You are a 3D modeling assistant helping users create and manipulate 3D scenes using hand gestures and voice commands.
@@ -123,7 +147,19 @@ Guidelines:
 - Be creative with positioning but keep objects visible
 - Acknowledge what you're doing before calling tools
 - For multiple operations, call tools sequentially
-- If user describes hand gestures, infer intent (e.g., "opening hand" = create object)`;
+- If user describes hand gestures, infer intent (e.g., "opening hand" = create object)
+- Use create_object only for basic primitives (sphere, cube, cylinder, cone). For anything more specific or complex (an animal, a tool, a named object), use generate_model instead with a clear descriptive prompt`;
+
+async function runGeneration(prompt) {
+  const result = await fal.subscribe("fal-ai/hyper3d/rodin/v2.5/text-to-3d", {
+    input: {
+      prompt,
+      geometry_file_format: "glb",
+    },
+    logs: false,
+  });
+  return result.data.model_mesh.url;
+}
 
 export async function chat(userMessage, conversationHistory = [], scene = []) {
   const messages = [
@@ -152,6 +188,20 @@ export async function chat(userMessage, conversationHistory = [], scene = []) {
         name: block.name,
         input: block.input,
       });
+    }
+  }
+
+  // generate_model needs an actual async call to Fal before the frontend can use it,
+  // so we run it here and attach the resulting model URL to the tool call's input.
+  for (const call of toolCalls) {
+    if (call.name === "generate_model") {
+      try {
+        const modelUrl = await runGeneration(call.input.prompt);
+        call.input.modelUrl = modelUrl;
+      } catch (err) {
+        console.error("Fal generation failed:", err);
+        call.input.error = "Generation failed, please try again.";
+      }
     }
   }
 
