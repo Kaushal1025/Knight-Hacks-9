@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import type { RefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, Environment, TransformControls, useGLTF } from '@react-three/drei';
+import { OrbitControls, Grid, Environment, TransformControls, useGLTF, Line } from '@react-three/drei';
 import SnapPanel from './SnapPanel';
 import BooleanPanel from './BooleanPanel';
 import ActionsPanel from './ActionsPanel';
+import ExtrudeTool, { buildExtrudeGeometry } from './ExtrudeTool';
 
 import {
   MathUtils,
@@ -103,9 +104,9 @@ function Sphere({ position, color, meshRef, grabbed, selected }: ShapeProps) {
 // GROUND
 // ==========================================
 
-function Ground() {
+function Ground({ onPointerDown }: { onPointerDown?: (e: any) => void }) {
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow onPointerDown={onPointerDown}>
       <planeGeometry args={[20, 20]} />
       <meshStandardMaterial color="#1a1d24" />
     </mesh>
@@ -375,12 +376,18 @@ function Scene({
   selectedObject,
   onSelectedChange,
   transformMode,
+  extrudeActive,
+  extrudePoints,
+  onExtrudePoint,
 }: {
   hands: HandData[];
   scaling: ScalingData | null;
   selectedObject: string | null;
   onSelectedChange: (key: string | null) => void;
   transformMode: 'translate' | 'rotate' | 'scale';
+  extrudeActive: boolean;
+  extrudePoints: [number, number][];
+  onExtrudePoint: (pt: [number, number]) => void;
 }) {
   const { camera } = useThree();
 
@@ -665,7 +672,16 @@ function Scene({
         grabbed={grabbedObject === 'sphere'}
         selected={selectedObject === 'sphere'}
       />
-      <Ground />
+      <Ground
+        onPointerDown={
+          extrudeActive
+            ? (e: any) => {
+                e.stopPropagation();
+                onExtrudePoint([e.point.x, e.point.z]);
+              }
+            : undefined
+        }
+      />
       <Grid
         position={[0, 0.001, 0]}
         args={[20, 20]}
@@ -674,6 +690,20 @@ function Scene({
         fadeDistance={25}
         infiniteGrid
       />
+
+      {extrudePoints.map((p, i) => (
+        <mesh key={i} position={[p[0], 0.05, p[1]]}>
+          <sphereGeometry args={[0.08, 12, 12]} />
+          <meshBasicMaterial color="#4cc9f0" />
+        </mesh>
+      ))}
+      {extrudePoints.length > 1 && (
+        <Line
+          points={extrudePoints.map((p) => [p[0], 0.05, p[1]] as [number, number, number])}
+          color="#4cc9f0"
+          lineWidth={2}
+        />
+      )}
 
       {objects.map((obj) => (
         <DynamicObject
@@ -723,6 +753,32 @@ export default function App() {
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const objects = useSceneStore((s) => s.objects);
+  const addObject = useSceneStore((s) => s.addObject);
+
+  const [extrudeActive, setExtrudeActive] = useState(false);
+  const [extrudePoints, setExtrudePoints] = useState<[number, number][]>([]);
+  const [extrudeHeight, setExtrudeHeight] = useState(3);
+
+  const handleExtrudeFinish = () => {
+    const geometry = buildExtrudeGeometry(extrudePoints, extrudeHeight);
+    if (geometry) {
+      addObject({
+        id: crypto.randomUUID(),
+        shape: 'custom',
+        position: [0, 0, 0],
+        scale: 1,
+        color: '#c084fc',
+        geometry,
+      });
+    }
+    setExtrudePoints([]);
+    setExtrudeActive(false);
+  };
+
+  const handleExtrudeCancel = () => {
+    setExtrudePoints([]);
+    setExtrudeActive(false);
+  };
 
 
   const selectedLabel =
@@ -752,6 +808,9 @@ export default function App() {
           selectedObject={selectedObject}
           onSelectedChange={setSelectedObject}
           transformMode={transformMode}
+          extrudeActive={extrudeActive}
+          extrudePoints={extrudePoints}
+          onExtrudePoint={(pt) => setExtrudePoints((pts) => [...pts, pt])}
         />
       </Canvas>
 
@@ -766,6 +825,16 @@ export default function App() {
       <SnapPanel />
       <ActionsPanel selectedId={inspectorId} onSelectedChange={setSelectedObject} />
       <BooleanPanel />
+      <ExtrudeTool
+        active={extrudeActive}
+        onToggle={() => setExtrudeActive((v) => !v)}
+        pointCount={extrudePoints.length}
+        height={extrudeHeight}
+        onHeightChange={setExtrudeHeight}
+        onFinish={handleExtrudeFinish}
+        onCancel={handleExtrudeCancel}
+        onUndoPoint={() => setExtrudePoints((pts) => pts.slice(0, -1))}
+      />
 
       <ChatBox />
     </div>
