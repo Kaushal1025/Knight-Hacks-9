@@ -1,6 +1,5 @@
 import { create } from 'zustand';
-import { BufferGeometry, BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry, TorusGeometry } from 'three';
-import { Evaluator, Brush, ADDITION, SUBTRACTION, INTERSECTION } from 'three-bvh-csg';
+import type { BufferGeometry } from 'three';
 
 export type ShapeType = 'sphere' | 'cube' | 'cylinder' | 'cone' | 'torus' | 'custom' | 'generated';
 
@@ -37,7 +36,6 @@ interface SceneStore {
   toggleSelected: (id: string) => void;
   toggleSnap: (enabled: boolean) => void;
   setSnap: (partial: Partial<SnapSettings>) => void;
-  booleanOp: (idA: string, idB: string, op: 'union' | 'subtract' | 'intersect') => void;
   undo: () => void;
 }
 
@@ -48,7 +46,7 @@ function applySnap(value: number, increment: number, enabled: boolean) {
 
 const MAX_HISTORY = 50;
 
-export const useSceneStore = create<SceneStore>((set, get) => ({
+export const useSceneStore = create<SceneStore>((set) => ({
   objects: [],
   selectedIds: [],
   snap: { enabled: false, translateSnap: 0.5, rotateSnap: 0.1, scaleSnap: 0.1 },
@@ -124,64 +122,6 @@ export const useSceneStore = create<SceneStore>((set, get) => ({
 
   toggleSnap: (enabled) => set((s) => ({ snap: { ...s.snap, enabled } })),
   setSnap: (partial) => set((s) => ({ snap: { ...s.snap, ...partial } })),
-
-  booleanOp: (idA, idB, op) => {
-    const a = get().objects.find((o) => o.id === idA);
-    const b = get().objects.find((o) => o.id === idB);
-    if (!a || !b) return;
-
-    const geometryFor = (o: SceneObject) => {
-      if (o.shape === 'custom' && o.geometry) return o.geometry;
-      switch (o.shape) {
-        case 'cube':
-          return new BoxGeometry(1, 1, 1);
-        case 'sphere':
-          return new SphereGeometry(0.6, 32, 32);
-        case 'cylinder':
-          return new CylinderGeometry(0.5, 0.5, 1, 32);
-        case 'cone':
-          return new ConeGeometry(0.6, 1.2, 32);
-        case 'torus':
-          return new TorusGeometry(0.5, 0.2, 16, 32);
-        default:
-          return new BoxGeometry(1, 1, 1);
-      }
-    };
-
-    const brushA = new Brush(geometryFor(a));
-    brushA.position.set(...a.position);
-    brushA.rotation.set(...a.rotation);
-    brushA.scale.setScalar(a.scale);
-    brushA.updateMatrixWorld(true);
-
-    const brushB = new Brush(geometryFor(b));
-    brushB.position.set(...b.position);
-    brushB.rotation.set(...b.rotation);
-    brushB.scale.setScalar(b.scale);
-    brushB.updateMatrixWorld(true);
-
-    const opMap = { union: ADDITION, subtract: SUBTRACTION, intersect: INTERSECTION };
-    const evaluator = new Evaluator();
-    const result = evaluator.evaluate(brushA, brushB, opMap[op]);
-
-    const resultId = crypto.randomUUID();
-    set((s) => ({
-      history: [...s.history.slice(-MAX_HISTORY + 1), s.objects],
-      objects: [
-        ...s.objects.filter((o) => o.id !== idA && o.id !== idB),
-        {
-          id: resultId,
-          shape: 'custom',
-          position: [0, 0, 0],
-          rotation: [0, 0, 0],
-          scale: 1,
-          color: a.color,
-          geometry: result.geometry,
-        },
-      ],
-      selectedIds: [resultId],
-    }));
-  },
 
   undo: () =>
     set((s) => {
