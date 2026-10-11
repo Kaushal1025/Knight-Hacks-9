@@ -19,6 +19,7 @@ import {
 
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 
 import HandTrackingStatus from './HandTrackingStatus';
 import HandSkeletons from './HandSkeletons';
@@ -34,6 +35,58 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
 const SCALE_SMOOTHING = 0.35;
 const SELECTED_EMISSIVE = '#ffd166';
+
+// ==========================================
+// BOUNDS: objects stay on the ground plane
+// (not below the floor, not past its edges)
+// ==========================================
+
+/** Height of the ground/grid. Nothing may extend below this. */
+const FLOOR_Y = 0;
+/** Half the ground plane's width: the plane is 20 x 20, centred on the origin. */
+const FLOOR_HALF_SIZE = 10;
+const BOUNDS_EPSILON = 1e-4;
+
+/** How far to shift [min, max] so it fits inside [-limit, limit] (centres it if too big). */
+function shiftInto(min: number, max: number, limit: number): number {
+  if (max - min >= 2 * limit) return -(min + max) / 2;
+  if (min < -limit) return -limit - min;
+  if (max > limit) return limit - max;
+  return 0;
+}
+
+/**
+ * Move the object the smallest amount needed so all of it is above the floor
+ * and inside the ground's edges. Returns true if it moved.
+ */
+function keepInsideBounds(mesh: Mesh, box: Box3): boolean {
+  box.setFromObject(mesh);
+  if (box.isEmpty()) return false;
+
+  const dy = Math.max(0, FLOOR_Y - box.min.y);
+  const dx = shiftInto(box.min.x, box.max.x, FLOOR_HALF_SIZE);
+  const dz = shiftInto(box.min.z, box.max.z, FLOOR_HALF_SIZE);
+
+  if (
+    Math.abs(dx) <= BOUNDS_EPSILON &&
+    dy <= BOUNDS_EPSILON &&
+    Math.abs(dz) <= BOUNDS_EPSILON
+  ) {
+    return false;
+  }
+  mesh.position.x += dx;
+  mesh.position.y += dy;
+  mesh.position.z += dz;
+  return true;
+}
+
+/** Update an object's stored position without adding an undo step. */
+function syncStoredPosition(id: string, mesh: Mesh) {
+  const { x, y, z } = mesh.position;
+  useSceneStore.setState((s) => ({
+    objects: s.objects.map((o) => (o.id === id ? { ...o, position: [x, y, z] } : o)),
+  }));
+}
 
 // ==========================================
 // GROUND
@@ -211,12 +264,12 @@ function ChatBox() {
   const [reply, setReply] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
+  const send = async (text: string) => {
+    if (!text.trim() || loading) return;
+    setInput(text); // show what's being sent (useful for voice)
     setLoading(true);
     try {
-      const message = await sendChatMessage(input);
+      const message = await sendChatMessage(text);
       setReply(message);
     } catch (err) {
       setReply('Error reaching AI backend. Is it running on localhost:3001?');
@@ -226,6 +279,16 @@ function ChatBox() {
       setLoading(false);
     }
   };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void send(input);
+  };
+
+  // Voice: speak a command, it's sent exactly like a typed one
+  const voice = useSpeechRecognition((transcript) => {
+    void send(transcript);
+  });
 
   return (
     <div
@@ -238,6 +301,20 @@ function ChatBox() {
         fontFamily: 'sans-serif',
       }}
     >
+      {voice.error && (
+        <div
+          style={{
+            background: 'rgba(60,20,24,0.9)',
+            color: '#ffb4b4',
+            padding: '6px 12px',
+            borderRadius: 8,
+            marginBottom: 8,
+            fontSize: 13,
+          }}
+        >
+          {voice.error}
+        </div>
+      )}
       {reply && (
         <div
           style={{
@@ -254,10 +331,10 @@ function ChatBox() {
       )}
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 8 }}>
         <input
-          value={input}
+          value={voice.listening ? voice.interim : input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g. Create a red cube"
-          disabled={loading}
+          placeholder={voice.listening ? 'Listening…' : 'e.g. Create a red cube'}
+          disabled={loading || voice.listening}
           style={{
             flex: 1,
             padding: '8px 12px',
@@ -267,6 +344,26 @@ function ChatBox() {
             color: '#fff',
           }}
         />
+        {voice.supported && (
+          <button
+            type="button"
+            onClick={voice.listening ? voice.stop : voice.start}
+            disabled={loading}
+            title={voice.listening ? 'Stop listening' : 'Speak a command'}
+            aria-label={voice.listening ? 'Stop listening' : 'Speak a command'}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: 'none',
+              background: voice.listening ? '#e94560' : '#2a2f3a',
+              color: '#fff',
+              cursor: loading ? 'default' : 'pointer',
+              boxShadow: voice.listening ? '0 0 12px #e94560' : 'none',
+            }}
+          >
+            {voice.listening ? '■' : '🎤'}
+          </button>
+        )}
         <button
           type="submit"
           disabled={loading}
@@ -365,6 +462,11 @@ function Scene({
 
   const [grabbedObject, setGrabbedObject] = useState<string | null>(null);
   const [isScaling, setIsScaling] = useState(false);
+
+  // Floor guard state
+  const floorBox = useRef(new Box3());
+  const needsFloorSync = useRef(new Set<string>());
+  const gizmoDragging = useRef(false);
 
   useEffect(() => {
     handsRef.current = hands;
@@ -553,6 +655,7 @@ function Scene({
       if (hasIntersection) {
         const target = intersection.sub(currentGrab.offset);
         currentGrab.mesh.position.lerp(target, 0.35);
+        keepInsideBounds(currentGrab.mesh, floorBox.current); // slide along floor/edges, never through
 
         if (currentGrab.type === 'dynamic') {
           moveObject(currentGrab.id, [
@@ -566,6 +669,31 @@ function Scene({
 
     previousPinching.current = pinching;
     previousHandLabel.current = hand.hand;
+  });
+
+  // Bounds guard. Registered after the main useFrame so it runs after this frame's
+  // drag/scale updates and before rendering: anything below the floor or past the
+  // ground's edges is pushed back inside (dragging into an edge slides along it).
+  useFrame(() => {
+    const draggedMesh = activeGrab.current?.mesh;
+    const scalingMesh = scaleSession.current?.target.mesh;
+
+    for (const [id, mesh] of dynamicMeshRefs.current) {
+      if (keepInsideBounds(mesh, floorBox.current)) {
+        needsFloorSync.current.add(id);
+      }
+
+      // Save the corrected height once nothing is actively moving the object
+      // (hand drag, two-hand scale, gizmo), so Undo/Save/AI see where it really is.
+      const busy =
+        mesh === draggedMesh ||
+        mesh === scalingMesh ||
+        (gizmoDragging.current && id === selectedObject);
+      if (!busy && needsFloorSync.current.has(id)) {
+        needsFloorSync.current.delete(id);
+        syncStoredPosition(id, mesh);
+      }
+    }
   });
 
   return (
@@ -636,9 +764,11 @@ function Scene({
             rotationSnap={snap.enabled ? snap.rotateSnap : null}
             scaleSnap={snap.enabled ? snap.scaleSnap : null}
             onMouseDown={() => {
+              gizmoDragging.current = true;
               if (orbitRef.current) orbitRef.current.enabled = false;
             }}
             onMouseUp={() => {
+              gizmoDragging.current = false;
               if (orbitRef.current) orbitRef.current.enabled = true;
               const mesh = dynamicMeshRefs.current.get(selectedObject!);
               if (mesh) {
