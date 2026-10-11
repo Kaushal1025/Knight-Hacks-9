@@ -6,3 +6,14 @@ html, body, #root {
   overflow: hidden;
   background: #0f1115;
 }
+
+/* Hand-pressable UI (see src/lib/handUI.ts) */
+.hand-hover {
+  outline: 2px solid #4cc9f0 !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 12px rgba(76, 201, 240, 0.7) !important;
+}
+.hand-press {
+  transform: scale(0.94);
+  filter: brightness(1.35);
+}

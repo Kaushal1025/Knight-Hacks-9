@@ -20,6 +20,7 @@ import {
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
+import { handUiTargetAt, pressWithHand, setHandHover } from './lib/handUI';
 
 import HandTrackingStatus from './HandTrackingStatus';
 import HandSkeletons from './HandSkeletons';
@@ -78,6 +79,42 @@ function keepInsideBounds(mesh: Mesh, box: Box3): boolean {
   mesh.position.y += dy;
   mesh.position.z += dz;
   return true;
+}
+
+// ==========================================
+// DEPTH: push/pull a grabbed object with your hand
+// Moving your hand toward the camera makes it look bigger; that pushes the
+// object deeper into the scene. Pulling your hand back brings it closer.
+// ==========================================
+
+/** Scene units moved per 100% change in apparent hand size. */
+const DEPTH_GAIN = 6;
+/** Ignore hand-size changes smaller than this (filters tracking jitter). */
+const DEPTH_DEADZONE = 0.08;
+/** Furthest an object can be pushed/pulled from where it was grabbed. */
+const DEPTH_MAX = 8;
+/** 0-1 per frame; lower = smoother but laggier depth. */
+const DEPTH_SMOOTHING = 0.2;
+/** Flip to -1 if pushing your hand forward should bring objects closer instead. */
+const DEPTH_DIRECTION = 1;
+/** Webcam aspect ratio (640x480) so hand size is measured in square units. */
+const WEBCAM_ASPECT = 640 / 480;
+
+/** Apparent hand size: wrist to middle-finger base, in normalized image units. */
+function handSize(hand: HandData): number | null {
+  const wrist = hand.landmarks[0];
+  const middleBase = hand.landmarks[9];
+  if (!wrist || !middleBase) return null;
+  const size = Math.hypot((middleBase.x - wrist.x) * WEBCAM_ASPECT, middleBase.y - wrist.y);
+  return size > 0.01 ? size : null;
+}
+
+/** Hand-size ratio -> how far to move the drag plane away from the camera. */
+function depthFromHandSize(ratio: number): number {
+  const change = ratio - 1;
+  if (Math.abs(change) <= DEPTH_DEADZONE) return 0;
+  const beyond = change - Math.sign(change) * DEPTH_DEADZONE;
+  return MathUtils.clamp(beyond * DEPTH_GAIN * DEPTH_DIRECTION, -DEPTH_MAX, DEPTH_MAX);
 }
 
 /** Update an object's stored position without adding an undo step. */
@@ -421,7 +458,7 @@ function Scene({
   extrudePoints: [number, number][];
   onExtrudePoint: (pt: [number, number]) => void;
 }) {
-  const { camera } = useThree();
+  const { camera, gl } = useThree();
 
   const objects = useSceneStore((s) => s.objects);
   const moveObject = useSceneStore((s) => s.moveObject);
@@ -450,7 +487,16 @@ function Scene({
   const previousHandLabel = useRef<string | null>(null);
 
   const activeGrab = useRef<
-    (GrabTarget & { handLabel: string; plane: Plane; offset: Vector3 }) | null
+    | (GrabTarget & {
+        handLabel: string;
+        plane: Plane;
+        offset: Vector3;
+        /** Depth control: hand size and plane position when the grab started */
+        startHandSize: number | null;
+        smoothedHandSize: number | null;
+        startPlaneConstant: number;
+      })
+    | null
   >(null);
 
   const selected = useRef<GrabTarget | null>(null);
@@ -552,6 +598,7 @@ function Scene({
 
     if (!hand) {
       releaseGrab();
+      setHandHover(null);
       previousPinching.current = false;
       previousHandLabel.current = null;
       waitForRelease.current = false;
@@ -577,6 +624,21 @@ function Scene({
     const pinchStarted =
       pinching && (!previousPinching.current || !sameHand) && !waitForRelease.current;
 
+    // Hand-pressable UI: highlight the button under the hand; a pinch presses it.
+    // Pinching over any panel never grabs or orbits the 3D scene behind it.
+    const ui = activeGrab.current || emptyPinch.current
+      ? null
+      : handUiTargetAt(position.x, position.y, gl.domElement);
+    setHandHover(ui?.clickable ?? null);
+
+    if (ui?.overUi && pinchStarted) {
+      if (ui.clickable) pressWithHand(ui.clickable);
+      waitForRelease.current = true; // one press per pinch
+      previousPinching.current = pinching;
+      previousHandLabel.current = hand.hand;
+      return;
+    }
+
     if (pinchStarted && !activeGrab.current) {
       const dynamicEntries = Array.from(dynamicMeshRefs.current.entries());
       const meshes = [
@@ -594,7 +656,10 @@ function Scene({
         const normal = camera.getWorldDirection(new Vector3());
         const plane = new Plane();
         plane.setFromNormalAndCoplanarPoint(normal, mesh.position);
-        const offset = hit.point.clone().sub(mesh.position);
+        // Offset from where the ray meets the drag plane (not the surface hit point),
+        // so the object doesn't jump when it's grabbed.
+        const planeHit = ray.intersectPlane(plane, new Vector3()) ?? hit.point.clone();
+        const offset = planeHit.sub(mesh.position);
 
         let target: GrabTarget;
         if (mesh === cubeRef.current) {
@@ -606,11 +671,15 @@ function Scene({
           target = { type: 'dynamic', id: found![0], mesh };
         }
 
+        const size = handSize(hand);
         activeGrab.current = {
           ...target,
           handLabel: hand.hand,
           plane,
           offset,
+          startHandSize: size,
+          smoothedHandSize: size,
+          startPlaneConstant: plane.constant,
         };
 
         setGrabbedObject(targetKey(target));
@@ -649,6 +718,21 @@ function Scene({
 
     if (activeGrab.current && pinching) {
       const currentGrab = activeGrab.current;
+
+      // Depth: slide the camera-facing drag plane toward/away from the camera
+      // based on how much bigger/smaller the hand looks than at grab start.
+      const size = handSize(hand);
+      if (size !== null && currentGrab.startHandSize !== null) {
+        currentGrab.smoothedHandSize = MathUtils.lerp(
+          currentGrab.smoothedHandSize ?? size,
+          size,
+          DEPTH_SMOOTHING,
+        );
+        const depth = depthFromHandSize(currentGrab.smoothedHandSize / currentGrab.startHandSize);
+        // plane.normal points away from the camera, so lowering the constant moves it away
+        currentGrab.plane.constant = currentGrab.startPlaneConstant - depth;
+      }
+
       const intersection = new Vector3();
       const hasIntersection = ray.intersectPlane(currentGrab.plane, intersection);
 
