@@ -19,6 +19,7 @@ import {
 
 import { useSceneStore, type SceneObject } from './store/sceneStore';
 import { sendChatMessage } from './lib/aiChat';
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 
 import HandTrackingStatus from './HandTrackingStatus';
 import HandSkeletons from './HandSkeletons';
@@ -211,12 +212,12 @@ function ChatBox() {
   const [reply, setReply] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
+  const send = async (text: string) => {
+    if (!text.trim() || loading) return;
+    setInput(text); // show what's being sent (useful for voice)
     setLoading(true);
     try {
-      const message = await sendChatMessage(input);
+      const message = await sendChatMessage(text);
       setReply(message);
     } catch (err) {
       setReply('Error reaching AI backend. Is it running on localhost:3001?');
@@ -226,6 +227,16 @@ function ChatBox() {
       setLoading(false);
     }
   };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void send(input);
+  };
+
+  // Voice: speak a command, it's sent exactly like a typed one
+  const voice = useSpeechRecognition((transcript) => {
+    void send(transcript);
+  });
 
   return (
     <div
@@ -238,6 +249,20 @@ function ChatBox() {
         fontFamily: 'sans-serif',
       }}
     >
+      {voice.error && (
+        <div
+          style={{
+            background: 'rgba(60,20,24,0.9)',
+            color: '#ffb4b4',
+            padding: '6px 12px',
+            borderRadius: 8,
+            marginBottom: 8,
+            fontSize: 13,
+          }}
+        >
+          {voice.error}
+        </div>
+      )}
       {reply && (
         <div
           style={{
@@ -254,10 +279,10 @@ function ChatBox() {
       )}
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 8 }}>
         <input
-          value={input}
+          value={voice.listening ? voice.interim : input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g. Create a red cube"
-          disabled={loading}
+          placeholder={voice.listening ? 'Listening…' : 'e.g. Create a red cube'}
+          disabled={loading || voice.listening}
           style={{
             flex: 1,
             padding: '8px 12px',
@@ -267,6 +292,26 @@ function ChatBox() {
             color: '#fff',
           }}
         />
+        {voice.supported && (
+          <button
+            type="button"
+            onClick={voice.listening ? voice.stop : voice.start}
+            disabled={loading}
+            title={voice.listening ? 'Stop listening' : 'Speak a command'}
+            aria-label={voice.listening ? 'Stop listening' : 'Speak a command'}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: 'none',
+              background: voice.listening ? '#e94560' : '#2a2f3a',
+              color: '#fff',
+              cursor: loading ? 'default' : 'pointer',
+              boxShadow: voice.listening ? '0 0 12px #e94560' : 'none',
+            }}
+          >
+            {voice.listening ? '■' : '🎤'}
+          </button>
+        )}
         <button
           type="submit"
           disabled={loading}
