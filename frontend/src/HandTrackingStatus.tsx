@@ -7,6 +7,7 @@ type Props = {
   error: string;
   scaling: ScalingData | null;
   selectedObject: string | null;
+  snapKind?: 'grid' | 'object' | null;
 };
 
 export default function HandTrackingStatus({
@@ -15,6 +16,7 @@ export default function HandTrackingStatus({
   error,
   scaling,
   selectedObject,
+  snapKind = null,
 }: Props) {
   return (
     <div
@@ -48,6 +50,12 @@ export default function HandTrackingStatus({
       ))}
 
       <p>Selected: {selectedObject ?? 'none'}</p>
+
+      {snapKind && (
+        <p style={{ color: '#4cc9f0' }}>
+          Snapping to {snapKind === 'object' ? 'object' : 'grid'}
+        </p>
+      )}
 
       {scaling?.active && (
         <p style={{ color: '#ffd166' }}>

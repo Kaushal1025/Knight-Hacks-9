@@ -117,6 +117,161 @@ function depthFromHandSize(ratio: number): number {
   return MathUtils.clamp(beyond * DEPTH_GAIN * DEPTH_DIRECTION, -DEPTH_MAX, DEPTH_MAX);
 }
 
+// ==========================================
+// SNAP GESTURE: pinch with thumb + MIDDLE finger to grab with snapping.
+// Near another object it snaps flush against it (stack on top / side by side);
+// otherwise it snaps to the grid. A normal thumb + index pinch moves freely.
+// ==========================================
+
+/** Same thresholds the CV backend uses for the index pinch (distance / hand size). */
+const SNAP_PINCH_START = 0.35;
+const SNAP_PINCH_END = 0.48;
+/** Grid spacing objects snap to (matches the grid's small cells). */
+const SNAP_GRID = 0.5;
+/** How close (scene units) a face must be to another object's face to snap to it. */
+const SNAP_OBJECT_DISTANCE = 0.6;
+/** Centres within this distance get lined up too (neater stacks). */
+const SNAP_ALIGN_DISTANCE = 0.35;
+
+type SnapKind = 'grid' | 'object' | null;
+
+/** Thumb-tip to middle-tip distance relative to hand size (mirrors the backend's index check). */
+function middlePinchRatio(hand: HandData): number | null {
+  const lm = hand.landmarks;
+  if (lm.length < 13) return null;
+  const handLen = Math.hypot(lm[5].x - lm[0].x, lm[5].y - lm[0].y);
+  if (handLen < 0.001) return null;
+  return Math.hypot(lm[4].x - lm[12].x, lm[4].y - lm[12].y) / handLen;
+}
+
+const AXES = ['x', 'y', 'z'] as const;
+const snapBoxA = new Box3();
+const snapBoxB = new Box3();
+const snapBestBox = new Box3();
+const snapShift = new Vector3();
+const snapCenterA = new Vector3();
+const snapCenterB = new Vector3();
+
+/**
+ * Where should `mesh` go if the hand wants it at `desired`? Writes the snapped
+ * position into `out` and returns what it snapped to.
+ */
+function snapPosition(mesh: Mesh, desired: Vector3, others: Mesh[], out: Vector3): SnapKind {
+  out.copy(desired);
+  // The object's bounding box as if it were already at `desired`
+  snapBoxA.setFromObject(mesh);
+  if (snapBoxA.isEmpty()) return null;
+  snapBoxA.translate(snapShift.copy(desired).sub(mesh.position));
+
+  // 1) Snap flush against the nearest face of another object
+  let bestAxis: (typeof AXES)[number] | null = null;
+  let bestShift = Infinity;
+  for (const other of others) {
+    snapBoxB.setFromObject(other);
+    if (snapBoxB.isEmpty()) continue;
+    for (const axis of AXES) {
+      // Only faces that actually face each other (overlap on the other two axes)
+      const facing = AXES.every(
+        (a) =>
+          a === axis ||
+          (snapBoxA.max[a] > snapBoxB.min[a] - SNAP_ALIGN_DISTANCE &&
+            snapBoxA.min[a] < snapBoxB.max[a] + SNAP_ALIGN_DISTANCE),
+      );
+      if (!facing) continue;
+      for (const shift of [snapBoxB.max[axis] - snapBoxA.min[axis], snapBoxB.min[axis] - snapBoxA.max[axis]]) {
+        if (Math.abs(shift) < SNAP_OBJECT_DISTANCE && Math.abs(shift) < Math.abs(bestShift)) {
+          bestShift = shift;
+          bestAxis = axis;
+          snapBestBox.copy(snapBoxB);
+        }
+      }
+    }
+  }
+
+  if (bestAxis) {
+    out[bestAxis] += bestShift;
+    // Line up centres on the other axes when they're already close
+    snapBoxA.getCenter(snapCenterA);
+    snapBestBox.getCenter(snapCenterB);
+    for (const a of AXES) {
+      if (a === bestAxis) continue;
+      const d = snapCenterB[a] - snapCenterA[a];
+      if (Math.abs(d) < SNAP_ALIGN_DISTANCE) out[a] += d;
+    }
+    return 'object';
+  }
+
+  // 2) Otherwise snap to the grid: centre on grid points, bottom on a grid height
+  out.x = Math.round(desired.x / SNAP_GRID) * SNAP_GRID;
+  out.z = Math.round(desired.z / SNAP_GRID) * SNAP_GRID;
+  const bottom = snapBoxA.min.y;
+  out.y += Math.round(bottom / SNAP_GRID) * SNAP_GRID - bottom;
+  return 'grid';
+}
+
+// ==========================================
+// SCALING WITHOUT OVERLAP: an object being scaled up pushes itself out of
+// other objects (along the shortest way out), the way the floor pushes it up.
+// ==========================================
+
+const sepBoxA = new Box3();
+const sepBoxB = new Box3();
+const sepCenterA = new Vector3();
+const sepCenterB = new Vector3();
+const SEPARATION_PASSES = 4;
+const SEPARATION_EPSILON = 1e-3;
+
+/** Is `mesh` currently overlapping `other` (bounding boxes)? */
+function overlaps(mesh: Mesh, other: Mesh): boolean {
+  sepBoxA.setFromObject(mesh);
+  sepBoxB.setFromObject(other);
+  if (sepBoxA.isEmpty() || sepBoxB.isEmpty()) return false;
+  sepBoxA.expandByScalar(-SEPARATION_EPSILON);
+  return sepBoxA.intersectsBox(sepBoxB);
+}
+
+/**
+ * Move `mesh` the shortest distance needed so it no longer overlaps any of
+ * `others`. Never pushes downward (the floor is below). Returns true if moved.
+ */
+function pushOutOfObjects(mesh: Mesh, others: Mesh[]): boolean {
+  let moved = false;
+  for (let pass = 0; pass < SEPARATION_PASSES; pass++) {
+    let changed = false;
+    for (const other of others) {
+      sepBoxA.setFromObject(mesh);
+      sepBoxB.setFromObject(other);
+      if (sepBoxA.isEmpty() || sepBoxB.isEmpty()) continue;
+      if (!sepBoxA.clone().expandByScalar(-SEPARATION_EPSILON).intersectsBox(sepBoxB)) continue;
+
+      sepBoxA.getCenter(sepCenterA);
+      sepBoxB.getCenter(sepCenterB);
+
+      // Penetration depth along each axis; push out along the smallest one.
+      let bestAxis: 'x' | 'y' | 'z' | null = null;
+      let bestMove = Infinity;
+      for (const axis of ['x', 'y', 'z'] as const) {
+        const towardPositive = sepCenterA[axis] >= sepCenterB[axis];
+        const move = towardPositive
+          ? sepBoxB.max[axis] - sepBoxA.min[axis] // push in + direction
+          : -(sepBoxA.max[axis] - sepBoxB.min[axis]); // push in - direction
+        if (axis === 'y' && move < 0) continue; // never push into the floor
+        if (Math.abs(move) < Math.abs(bestMove)) {
+          bestMove = move;
+          bestAxis = axis;
+        }
+      }
+      if (bestAxis) {
+        mesh.position[bestAxis] += bestMove;
+        changed = true;
+        moved = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return moved;
+}
+
 /** Update an object's stored position without adding an undo step. */
 function syncStoredPosition(id: string, mesh: Mesh) {
   const { x, y, z } = mesh.position;
@@ -437,6 +592,8 @@ function targetKey(target: GrabTarget): string {
 type ScaleSession = {
   target: GrabTarget;
   initialScale: number;
+  /** Objects it was already overlapping when scaling began (left alone, e.g. for booleans) */
+  alreadyOverlapping: Set<Mesh>;
 };
 
 function Scene({
@@ -444,6 +601,7 @@ function Scene({
   scaling,
   selectedObject,
   onSelectedChange,
+  onSnapChange,
   transformMode,
   extrudeActive,
   extrudePoints,
@@ -453,6 +611,7 @@ function Scene({
   scaling: ScalingData | null;
   selectedObject: string | null;
   onSelectedChange: (key: string | null) => void;
+  onSnapChange: (kind: SnapKind) => void;
   transformMode: 'translate' | 'rotate' | 'scale';
   extrudeActive: boolean;
   extrudePoints: [number, number][];
@@ -495,6 +654,8 @@ function Scene({
         startHandSize: number | null;
         smoothedHandSize: number | null;
         startPlaneConstant: number;
+        /** Grabbed with the thumb + middle finger snap pinch */
+        snap: boolean;
       })
     | null
   >(null);
@@ -527,10 +688,22 @@ function Scene({
     onSelectedChange(target ? targetKey(target) : null);
   };
 
+  // Snap gesture state
+  const middlePinching = useRef(false);
+  const snapKind = useRef<SnapKind>(null);
+  const snapTarget = useRef(new Vector3());
+
+  const setSnapKind = (kind: SnapKind) => {
+    if (snapKind.current === kind) return;
+    snapKind.current = kind;
+    onSnapChange(kind);
+  };
+
   const releaseGrab = () => {
     if (!activeGrab.current) return;
     activeGrab.current = null;
     setGrabbedObject(null);
+    setSnapKind(null);
   };
 
   const endScaling = () => {
@@ -541,6 +714,8 @@ function Scene({
 
     if (session.target.type === 'dynamic') {
       scaleObject(session.target.id, session.target.mesh.scale.x);
+      // Scaling may have pushed it out of other objects: save where it ended up
+      syncStoredPosition(session.target.id, session.target.mesh);
     }
   };
 
@@ -564,9 +739,15 @@ function Scene({
       waitForRelease.current = true;
 
       if (!scaleSession.current && selected.current) {
+        const scalingMesh = selected.current.mesh;
         scaleSession.current = {
           target: selected.current,
-          initialScale: selected.current.mesh.scale.x,
+          initialScale: scalingMesh.scale.x,
+          alreadyOverlapping: new Set(
+            Array.from(dynamicMeshRefs.current.values()).filter(
+              (m) => m !== scalingMesh && overlaps(scalingMesh, m),
+            ),
+          ),
         };
         setIsScaling(true);
       }
@@ -582,6 +763,12 @@ function Scene({
         );
         const mesh = session.target.mesh;
         mesh.scale.setScalar(MathUtils.lerp(mesh.scale.x, targetScale, SCALE_SMOOTHING));
+
+        // Growing into another object pushes this one out instead of overlapping
+        const others = Array.from(dynamicMeshRefs.current.values()).filter(
+          (m) => m !== mesh && !session.alreadyOverlapping.has(m),
+        );
+        pushOutOfObjects(mesh, others);
       }
 
       previousPinching.current = true;
@@ -592,9 +779,20 @@ function Scene({
 
     const grab = activeGrab.current;
 
+    // Which hand drives one-hand gestures? While grabbing: the grabbing hand.
+    // Otherwise: whichever hand is pinching (so either hand works while both are
+    // visible), keeping the same hand if it's still pinching; else the right hand.
+    const isPinchingAny = (h: HandData) => {
+      if (h.pinching) return true;
+      const r = middlePinchRatio(h);
+      return r !== null && r < SNAP_PINCH_START;
+    };
     const hand = grab
       ? currentHands.find((h) => h.hand === grab.handLabel)
-      : currentHands.find((h) => h.hand === 'Right') ?? currentHands[0];
+      : (currentHands.find((h) => h.hand === previousHandLabel.current && isPinchingAny(h)) ??
+        currentHands.find(isPinchingAny) ??
+        currentHands.find((h) => h.hand === 'Right') ??
+        currentHands[0]);
 
     if (!hand) {
       releaseGrab();
@@ -605,7 +803,14 @@ function Scene({
       return;
     }
 
-    const pinching = hand.pinching;
+    // Thumb + middle finger pinch (with hysteresis, like the backend's index pinch)
+    const middleRatio = middlePinchRatio(hand);
+    middlePinching.current =
+      middleRatio !== null &&
+      middleRatio < (middlePinching.current ? SNAP_PINCH_END : SNAP_PINCH_START);
+    const snapPinch = middlePinching.current && !hand.pinching;
+
+    const pinching = hand.pinching || snapPinch;
     const position = hand.position;
 
     if (waitForRelease.current && !pinching) {
@@ -680,6 +885,7 @@ function Scene({
           startHandSize: size,
           smoothedHandSize: size,
           startPlaneConstant: plane.constant,
+          snap: snapPinch,
         };
 
         setGrabbedObject(targetKey(target));
@@ -737,7 +943,14 @@ function Scene({
       const hasIntersection = ray.intersectPlane(currentGrab.plane, intersection);
 
       if (hasIntersection) {
-        const target = intersection.sub(currentGrab.offset);
+        let target = intersection.sub(currentGrab.offset);
+        if (currentGrab.snap) {
+          const others = Array.from(dynamicMeshRefs.current.values()).filter(
+            (m) => m !== currentGrab.mesh,
+          );
+          setSnapKind(snapPosition(currentGrab.mesh, target, others, snapTarget.current));
+          target = snapTarget.current;
+        }
         currentGrab.mesh.position.lerp(target, 0.35);
         keepInsideBounds(currentGrab.mesh, floorBox.current); // slide along floor/edges, never through
 
@@ -876,6 +1089,7 @@ function Scene({
 export default function App() {
   const { hands, connected, error, scaling } = useHandTracking();
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
+  const [snapKind, setSnapKind] = useState<SnapKind>(null);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const objects = useSceneStore((s) => s.objects);
   const addObject = useSceneStore((s) => s.addObject);
@@ -922,6 +1136,7 @@ export default function App() {
         error={error}
         scaling={scaling}
         selectedObject={selectedLabel}
+        snapKind={snapKind}
       />
 
       <HandSkeletons hands={hands} scaling={scaling} />
@@ -932,6 +1147,7 @@ export default function App() {
           scaling={scaling}
           selectedObject={selectedObject}
           onSelectedChange={setSelectedObject}
+          onSnapChange={setSnapKind}
           transformMode={transformMode}
           extrudeActive={extrudeActive}
           extrudePoints={extrudePoints}
