@@ -9,6 +9,7 @@ import {
   MathUtils,
   Mesh,
   Plane,
+  Quaternion,
   Raycaster,
   Spherical,
   Vector2,
@@ -52,9 +53,22 @@ const ROTATE_STEP = MathUtils.degToRad(15);
 /** Flip to -1 if twisting clockwise turns objects the wrong way. */
 const ROTATE_DIRECTION = 1;
 const ROTATE_SMOOTHING = 0.35;
+/**
+ * TILT: in rotate mode, moving both hands UP or DOWN together tips the object
+ * forward/back (like rolling a ball between your hands), in the same 15° steps.
+ */
+/** Vertical movement of both hands (fraction of screen height) that locks ROTATE mode. */
+const TILT_LOCK_THRESHOLD = 0.08;
+/** Radians of tilt per full-screen-height hand movement. */
+const TILT_GAIN = Math.PI;
+/** Flip to -1 if moving your hands up tips objects the wrong way. */
+const TILT_DIRECTION = 1;
+const WORLD_UP = new Vector3(0, 1, 0);
+const turnQuat = new Quaternion();
+const tiltQuat = new Quaternion();
 
 type TwoHandMode = 'pending' | 'scale' | 'rotate';
-type TwoHandInfo = { mode: TwoHandMode; degrees: number; scale: number } | null;
+type TwoHandInfo = { mode: TwoHandMode; degrees: number; tilt: number; scale: number } | null;
 
 /** Angle of the line from the left hand to the right hand, in screen space. */
 function twoHandAngle(hands: HandData[]): number | null {
@@ -77,6 +91,12 @@ function twoHandDistance(hands: HandData[]): number | null {
   const [a, b] = hands;
   const d = Math.hypot((b.position.x - a.position.x) * WEBCAM_ASPECT, b.position.y - a.position.y);
   return d > 0.01 ? d : null;
+}
+
+/** Average height of the two hands (normalized screen y, 0 = top). */
+function twoHandMidY(hands: HandData[]): number | null {
+  if (hands.length < 2) return null;
+  return (hands[0].position.y + hands[1].position.y) / 2;
 }
 
 /** Smallest signed difference between two angles, in [-PI, PI]. */
@@ -691,7 +711,14 @@ type ScaleSession = {
   /** Undecided until the first clear spread or twist */
   mode: TwoHandMode;
   startAngle: number | null;
-  initialRotationY: number;
+  /** Hands' average height at start (for tilt) */
+  startMidY: number | null;
+  /** Orientation at start, and the exact-step orientation it's heading to */
+  initialQuaternion: Quaternion;
+  targetQuaternion: Quaternion;
+  /** Horizontal axis pointing to the camera's right (tilt turns around this) */
+  tiltAxis: Vector3;
+  reportedTilt: number;
   /** Hand distance when both hands started pinching */
   startDistance: number | null;
   /** Scale factor at the moment SCALE locked (so it doesn't jump) */
@@ -700,8 +727,6 @@ type ScaleSession = {
   reportedScale: number;
   /** Last reported rotation step, to avoid re-rendering every frame */
   reportedDegrees: number;
-  /** Rotation the object is heading to (exact step), applied on release */
-  targetRotationY: number;
   /** Objects it was already overlapping when scaling began (left alone, e.g. for booleans) */
   alreadyOverlapping: Set<Mesh>;
 };
@@ -839,7 +864,7 @@ function Scene({
         // Scaling may have pushed it out of other objects: save where it ended up
         syncStoredPosition(session.target.id, mesh);
       } else if (session.mode === 'rotate') {
-        mesh.rotation.y = session.targetRotationY; // land exactly on the step
+        mesh.quaternion.copy(session.targetQuaternion); // land exactly on the step
         rotateObject(session.target.id, [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z]);
       }
     }
@@ -873,10 +898,16 @@ function Scene({
           startAngle: twoHandAngle(currentHands),
           startDistance: twoHandDistance(currentHands),
           reportedScale: 1,
-          initialRotationY: scalingMesh.rotation.y,
+          startMidY: twoHandMidY(currentHands),
+          initialQuaternion: scalingMesh.quaternion.clone(),
+          targetQuaternion: scalingMesh.quaternion.clone(),
+          tiltAxis: new Vector3()
+            .setFromMatrixColumn(camera.matrixWorld, 0)
+            .setY(0)
+            .normalize(),
+          reportedTilt: 0,
           scaleFactorAtLock: 1,
           reportedDegrees: 0,
-          targetRotationY: scalingMesh.rotation.y,
           alreadyOverlapping: new Set(
             Array.from(dynamicMeshRefs.current.values()).filter(
               (m) => m !== scalingMesh && overlaps(scalingMesh, m),
@@ -884,7 +915,7 @@ function Scene({
           ),
         };
         setIsScaling(true);
-        onTwoHandChange({ mode: 'pending', degrees: 0, scale: 1 });
+        onTwoHandChange({ mode: 'pending', degrees: 0, tilt: 0, scale: 1 });
       }
 
       const session = scaleSession.current;
@@ -899,28 +930,41 @@ function Scene({
         session && session.startAngle !== null && angle !== null
           ? angleDelta(angle, session.startAngle)
           : 0;
+      const midY = twoHandMidY(currentHands);
+      // Positive when both hands moved up
+      const lift = session && session.startMidY !== null && midY !== null ? session.startMidY - midY : 0;
 
       // Decide the mode from whichever movement clearly happens first
       if (session && session.mode === 'pending' && Number.isFinite(factor) && factor > 0) {
-        if (Math.abs(twist) >= ROTATE_LOCK_THRESHOLD) {
+        if (Math.abs(twist) >= ROTATE_LOCK_THRESHOLD || Math.abs(lift) >= TILT_LOCK_THRESHOLD) {
           session.mode = 'rotate';
         } else if (Math.abs(factor - 1) >= SCALE_LOCK_THRESHOLD) {
           session.mode = 'scale';
           session.scaleFactorAtLock = factor;
         }
-        if (session.mode !== 'pending') onTwoHandChange({ mode: session.mode, degrees: 0, scale: 1 });
+        if (session.mode !== 'pending') onTwoHandChange({ mode: session.mode, degrees: 0, tilt: 0, scale: 1 });
       }
 
       if (session && session.mode === 'rotate') {
-        const steps = Math.round(twist / ROTATE_STEP);
-        const targetY = session.initialRotationY - steps * ROTATE_STEP * ROTATE_DIRECTION;
+        // Turn (twist) around the vertical axis + tilt (hands up/down) around
+        // the camera's horizontal axis, both in 15° steps, applied in world space.
+        const turnSteps = Math.round(twist / ROTATE_STEP);
+        const tiltSteps = Math.round((lift * TILT_GAIN) / ROTATE_STEP);
+        turnQuat.setFromAxisAngle(WORLD_UP, -turnSteps * ROTATE_STEP * ROTATE_DIRECTION);
+        tiltQuat.setFromAxisAngle(session.tiltAxis, -tiltSteps * ROTATE_STEP * TILT_DIRECTION);
+        session.targetQuaternion
+          .copy(tiltQuat)
+          .multiply(turnQuat)
+          .multiply(session.initialQuaternion);
         const mesh = session.target.mesh;
-        session.targetRotationY = targetY;
-        mesh.rotation.y = MathUtils.lerp(mesh.rotation.y, targetY, ROTATE_SMOOTHING);
-        const degrees = Math.round(MathUtils.radToDeg(steps * ROTATE_STEP));
-        if (degrees !== session.reportedDegrees) {
+        mesh.quaternion.slerp(session.targetQuaternion, ROTATE_SMOOTHING);
+
+        const degrees = Math.round(MathUtils.radToDeg(turnSteps * ROTATE_STEP));
+        const tilt = Math.round(MathUtils.radToDeg(tiltSteps * ROTATE_STEP));
+        if (degrees !== session.reportedDegrees || tilt !== session.reportedTilt) {
           session.reportedDegrees = degrees;
-          onTwoHandChange({ mode: 'rotate', degrees, scale: 1 });
+          session.reportedTilt = tilt;
+          onTwoHandChange({ mode: 'rotate', degrees, tilt, scale: 1 });
         }
       }
 
@@ -935,7 +979,7 @@ function Scene({
         const shown = Math.round((targetScale / session.initialScale) * 20) / 20; // 0.05 steps
         if (shown !== session.reportedScale) {
           session.reportedScale = shown;
-          onTwoHandChange({ mode: 'scale', degrees: 0, scale: shown });
+          onTwoHandChange({ mode: 'scale', degrees: 0, tilt: 0, scale: shown });
         }
 
         // Growing into another object pushes this one out instead of overlapping
