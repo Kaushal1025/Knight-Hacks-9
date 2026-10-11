@@ -35,6 +35,42 @@ import type { HandData, ScalingData } from './hooks/useHandTracking';
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
 const SCALE_SMOOTHING = 0.35;
+
+// ==========================================
+// TWO-HAND TWIST TO ROTATE
+// With both hands pinching on a selected object, the first clear movement
+// picks the mode for that pinch: spread/squeeze = SCALE, steering-wheel
+// twist = ROTATE (around the vertical axis, like a turntable).
+// ==========================================
+
+/** Size change (from the backend's scale factor) that locks SCALE mode. */
+const SCALE_LOCK_THRESHOLD = 0.15;
+/** Twist angle that locks ROTATE mode. */
+const ROTATE_LOCK_THRESHOLD = MathUtils.degToRad(15);
+/** Rotation snaps to these steps (also hides tracking wobble). */
+const ROTATE_STEP = MathUtils.degToRad(15);
+/** Flip to -1 if twisting clockwise turns objects the wrong way. */
+const ROTATE_DIRECTION = 1;
+const ROTATE_SMOOTHING = 0.35;
+
+type TwoHandMode = 'pending' | 'scale' | 'rotate';
+type TwoHandInfo = { mode: TwoHandMode; degrees: number } | null;
+
+/** Angle of the line from the left hand to the right hand, in screen space. */
+function twoHandAngle(hands: HandData[]): number | null {
+  const left = hands.find((h) => h.hand === 'Left') ?? hands[0];
+  const right = hands.find((h) => h.hand === 'Right' && h !== left) ?? hands.find((h) => h !== left);
+  if (!left || !right) return null;
+  return Math.atan2(
+    right.position.y - left.position.y,
+    (right.position.x - left.position.x) * WEBCAM_ASPECT,
+  );
+}
+
+/** Smallest signed difference between two angles, in [-PI, PI]. */
+function angleDelta(a: number, b: number): number {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+}
 const SELECTED_EMISSIVE = '#ffd166';
 
 // ==========================================
@@ -640,6 +676,16 @@ function targetKey(target: GrabTarget): string {
 type ScaleSession = {
   target: GrabTarget;
   initialScale: number;
+  /** Undecided until the first clear spread or twist */
+  mode: TwoHandMode;
+  startAngle: number | null;
+  initialRotationY: number;
+  /** Backend scale factor at the moment SCALE locked (so it doesn't jump) */
+  scaleFactorAtLock: number;
+  /** Last reported rotation step, to avoid re-rendering every frame */
+  reportedDegrees: number;
+  /** Rotation the object is heading to (exact step), applied on release */
+  targetRotationY: number;
   /** Objects it was already overlapping when scaling began (left alone, e.g. for booleans) */
   alreadyOverlapping: Set<Mesh>;
 };
@@ -650,6 +696,7 @@ function Scene({
   selectedObject,
   onSelectedChange,
   onSnapChange,
+  onTwoHandChange,
   transformMode,
   extrudeActive,
   extrudePoints,
@@ -660,6 +707,7 @@ function Scene({
   selectedObject: string | null;
   onSelectedChange: (key: string | null) => void;
   onSnapChange: (kind: SnapKind) => void;
+  onTwoHandChange: (info: TwoHandInfo) => void;
   transformMode: 'translate' | 'rotate' | 'scale';
   extrudeActive: boolean;
   extrudePoints: [number, number][];
@@ -766,11 +814,18 @@ function Scene({
     if (!session) return;
     scaleSession.current = null;
     setIsScaling(false);
+    onTwoHandChange(null);
 
     if (session.target.type === 'dynamic') {
-      scaleObject(session.target.id, session.target.mesh.scale.x);
-      // Scaling may have pushed it out of other objects: save where it ended up
-      syncStoredPosition(session.target.id, session.target.mesh);
+      const mesh = session.target.mesh;
+      if (session.mode === 'scale') {
+        scaleObject(session.target.id, mesh.scale.x);
+        // Scaling may have pushed it out of other objects: save where it ended up
+        syncStoredPosition(session.target.id, mesh);
+      } else if (session.mode === 'rotate') {
+        mesh.rotation.y = session.targetRotationY; // land exactly on the step
+        rotateObject(session.target.id, [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z]);
+      }
     }
   };
 
@@ -798,6 +853,12 @@ function Scene({
         scaleSession.current = {
           target: selected.current,
           initialScale: scalingMesh.scale.x,
+          mode: 'pending',
+          startAngle: twoHandAngle(currentHands),
+          initialRotationY: scalingMesh.rotation.y,
+          scaleFactorAtLock: 1,
+          reportedDegrees: 0,
+          targetRotationY: scalingMesh.rotation.y,
           alreadyOverlapping: new Set(
             Array.from(dynamicMeshRefs.current.values()).filter(
               (m) => m !== scalingMesh && overlaps(scalingMesh, m),
@@ -805,14 +866,44 @@ function Scene({
           ),
         };
         setIsScaling(true);
+        onTwoHandChange({ mode: 'pending', degrees: 0 });
       }
 
       const session = scaleSession.current;
       const factor = currentScaling.scale_factor;
+      const angle = twoHandAngle(currentHands);
+      const twist =
+        session && session.startAngle !== null && angle !== null
+          ? angleDelta(angle, session.startAngle)
+          : 0;
 
-      if (session && Number.isFinite(factor) && factor > 0) {
+      // Decide the mode from whichever movement clearly happens first
+      if (session && session.mode === 'pending' && Number.isFinite(factor) && factor > 0) {
+        if (Math.abs(twist) >= ROTATE_LOCK_THRESHOLD) {
+          session.mode = 'rotate';
+        } else if (Math.abs(factor - 1) >= SCALE_LOCK_THRESHOLD) {
+          session.mode = 'scale';
+          session.scaleFactorAtLock = factor;
+        }
+        if (session.mode !== 'pending') onTwoHandChange({ mode: session.mode, degrees: 0 });
+      }
+
+      if (session && session.mode === 'rotate') {
+        const steps = Math.round(twist / ROTATE_STEP);
+        const targetY = session.initialRotationY - steps * ROTATE_STEP * ROTATE_DIRECTION;
+        const mesh = session.target.mesh;
+        session.targetRotationY = targetY;
+        mesh.rotation.y = MathUtils.lerp(mesh.rotation.y, targetY, ROTATE_SMOOTHING);
+        const degrees = Math.round(MathUtils.radToDeg(steps * ROTATE_STEP));
+        if (degrees !== session.reportedDegrees) {
+          session.reportedDegrees = degrees;
+          onTwoHandChange({ mode: 'rotate', degrees });
+        }
+      }
+
+      if (session && session.mode === 'scale' && Number.isFinite(factor) && factor > 0) {
         const targetScale = MathUtils.clamp(
-          session.initialScale * factor,
+          session.initialScale * (factor / session.scaleFactorAtLock),
           MIN_SCALE,
           MAX_SCALE,
         );
@@ -1151,6 +1242,7 @@ export default function App() {
   const { hands, connected, error, scaling } = useHandTracking();
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
   const [snapKind, setSnapKind] = useState<SnapKind>(null);
+  const [twoHand, setTwoHand] = useState<TwoHandInfo>(null);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const objects = useSceneStore((s) => s.objects);
   const addObject = useSceneStore((s) => s.addObject);
@@ -1198,6 +1290,7 @@ export default function App() {
         scaling={scaling}
         selectedObject={selectedLabel}
         snapKind={snapKind}
+        twoHand={twoHand}
       />
 
       <HandSkeletons hands={hands} scaling={scaling} />
@@ -1209,6 +1302,7 @@ export default function App() {
           selectedObject={selectedObject}
           onSelectedChange={setSelectedObject}
           onSnapChange={setSnapKind}
+          onTwoHandChange={setTwoHand}
           transformMode={transformMode}
           extrudeActive={extrudeActive}
           extrudePoints={extrudePoints}
